@@ -220,8 +220,8 @@ def test_node_construction():
     test_layer = Dense(16, name='test_layer')
     a_test = test_layer(a)
     assert K.int_shape(test_layer.kernel) == (32, 16)
-    assert test_layer.input == a
-    assert test_layer.output == a_test
+    assert test_layer.input is a
+    assert test_layer.output is a_test
     assert test_layer.input_mask is None
     assert test_layer.output_mask is None
     assert test_layer.input_shape == (None, 32)
@@ -236,10 +236,10 @@ def test_node_construction():
     with pytest.raises(AttributeError):
         dense.output_mask
 
-    assert dense.get_input_at(0) == a
-    assert dense.get_input_at(1) == b
-    assert dense.get_output_at(0) == a_2
-    assert dense.get_output_at(1) == b_2
+    assert dense.get_input_at(0) is a
+    assert dense.get_input_at(1)is b
+    assert dense.get_output_at(0) is a_2
+    assert dense.get_output_at(1) is b_2
     assert dense.get_input_shape_at(0) == (None, 32)
     assert dense.get_input_shape_at(1) == (None, 32)
     assert dense.get_output_shape_at(0) == (None, 16)
@@ -298,7 +298,9 @@ def test_multi_input_layer():
     assert [x.shape for x in fn_outputs] == [(10, 64), (10, 5)]
 
     # test get_source_inputs
-    assert get_source_inputs(c) == [a, b]
+    source_inputs = get_source_inputs(c)
+    assert source_inputs[0] is a
+    assert source_inputs[1] is b
 
     # serialization / deserialization
     json_config = model.to_json()
@@ -468,31 +470,28 @@ def test_recursion():
         Model([j, k], [m, n, 0])
 
     ####################################################
-    # test calling layers/models on TF tensors
+    # test calling layers/models on placeholders
+    j = Input(shape=(32,), name='input_j')
+    k = Input(shape=(32,), name='input_k')
+    m, n = model([j, k])
+    outer_model = Model([j, k], [m, n])
 
-    if K._BACKEND == 'tensorflow':
-        import tensorflow as tf
-        j = Input(shape=(32,), name='input_j')
-        k = Input(shape=(32,), name='input_k')
-        m, n = model([j, k])
-        tf_model = Model([j, k], [m, n])
+    j_tf = K.placeholder(shape=(None, 32), dtype=K.floatx())
+    k_tf = K.placeholder(shape=(None, 32), dtype=K.floatx())
+    m_tf, n_tf = outer_model([j_tf, k_tf])
+    assert K.int_shape(m_tf) == (None, 64)
+    assert K.int_shape(n_tf) == (None, 5)
 
-        j_tf = tf.placeholder(dtype=K.floatx())
-        k_tf = tf.placeholder(dtype=K.floatx())
-        m_tf, n_tf = tf_model([j_tf, k_tf])
-        assert m_tf.get_shape().as_list() == [None, 64]
-        assert n_tf.get_shape().as_list() == [None, 5]
+    # test merge
+    layers.concatenate([j_tf, k_tf], axis=1)
+    layers.add([j_tf, k_tf])
 
-        # test merge
-        layers.concatenate([j_tf, k_tf], axis=1)
-        layers.add([j_tf, k_tf])
+    # test tensor input
+    x = K.placeholder(shape=(None, 2), dtype=K.floatx())
+    InputLayer(input_tensor=x)
 
-        # test tensor input
-        x = tf.placeholder(shape=(None, 2), dtype=K.floatx())
-        InputLayer(input_tensor=x)
-
-        x = Input(tensor=x)
-        Dense(2)(x)
+    x = Input(tensor=x)
+    Dense(2)(x)
 
 
 def test_load_layers():
@@ -760,6 +759,43 @@ def test_layer_sharing_at_heterogeneous_depth_with_concat():
     np.testing.assert_allclose(output_val, output_val_2, atol=1e-6)
 
 
+def test_layer_sharing_at_heterogeneous_depth_order():
+    # This tests for the bug in this issue
+    # https://github.com/keras-team/keras/issues/11159
+    # It occurs with layer sharing at heterogeneous depth when
+    # the layers need to be applied in an order that differs from
+    # the order that occurs in the config.
+
+    input_shape = (1, 12)
+    input_layer = Input(shape=input_shape)
+
+    A = Dense(12, name='layer_a')
+    r1 = layers.Reshape((12,))(input_layer)
+    Aout1 = A(r1)
+
+    r2 = layers.Reshape((12,))(A(input_layer))
+    Aout2 = A(r2)
+
+    # Note: if the order of the layers in the concat is
+    # changed to ([Aout1, Aout2]) the bug doesn't trigger
+    c1 = layers.concatenate([Aout2, Aout1])
+    output = Dense(2, name='layer_b')(c1)
+
+    M = Model(inputs=input_layer, outputs=output)
+
+    x_val = np.random.random((10,) + input_shape)
+    output_val = M.predict(x_val)
+
+    config = M.get_config()
+    weights = M.get_weights()
+
+    M2 = Model.from_config(config)
+    M2.set_weights(weights)
+
+    output_val_2 = M2.predict(x_val)
+    np.testing.assert_allclose(output_val, output_val_2, atol=1e-6)
+
+
 def test_multi_output_mask():
     """Fixes #7589"""
     class TestMultiOutputLayer(Layer):
@@ -792,7 +828,7 @@ def test_multi_output_mask():
 def test_constant_initializer_with_numpy():
     model = Sequential()
     model.add(Dense(2, input_shape=(3,),
-                    kernel_initializer=Constant(np.ones((3, 2)))))
+                    kernel_initializer=Constant(1.)))
     model.add(Dense(3))
     model.compile(loss='mse', optimizer='sgd', metrics=['acc'])
 
@@ -801,6 +837,26 @@ def test_constant_initializer_with_numpy():
 
     yaml_str = model.to_yaml()
     model_from_yaml(yaml_str).summary()
+
+
+@pytest.mark.skipif(K.backend() == 'cntk',
+                    reason='Float64 not supported with CNTK.')
+def test_initialization_dtype():
+    class TestLayer(Layer):
+        def __init__(self):
+            super(TestLayer, self).__init__(dtype='int64')
+            self.w = self.add_weight('w', [], initializer=Constant(1))
+
+    layer = TestLayer()
+    assert K.dtype(layer.w) == 'int64'
+
+    class TestModel(Model):
+        def __init__(self):
+            super(TestModel, self).__init__(dtype='int64')
+            self.w = self.add_weight('w', [], initializer=Constant(1))
+
+    model = TestModel()
+    assert K.dtype(model.w) == 'int64'
 
 
 if __name__ == '__main__':

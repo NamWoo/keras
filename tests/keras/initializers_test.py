@@ -104,6 +104,18 @@ def test_orthogonal(tensor_shape):
             target_mean=0.)
 
 
+def test_orthogonal_init_does_not_affect_global_rng():
+    np.random.seed(1337)
+    before = np.random.randint(0, 100, size=10)
+
+    np.random.seed(1337)
+    init = initializers.orthogonal(seed=9876)
+    init(shape=(10, 5))
+    after = np.random.randint(0, 100, size=10)
+
+    assert np.array_equal(before, after)
+
+
 @pytest.mark.parametrize('tensor_shape',
                          [(100, 100), (10, 20), (30, 80), (1, 2, 3, 4)],
                          ids=['FC', 'RNN', 'RNN_INVALID', 'CONV'])
@@ -128,6 +140,26 @@ def test_zero(tensor_shape):
 def test_one(tensor_shape):
     _runner(initializers.ones(), tensor_shape,
             target_mean=1., target_max=1.)
+
+
+@pytest.mark.parametrize('initializer',
+                         [initializers.orthogonal,
+                          initializers.uniform,
+                          initializers.normal,
+                          initializers.truncated_normal,
+                          initializers.VarianceScaling],
+                         ids=['orthogonal',
+                              'uniform',
+                              'normal',
+                              'truncated_normal',
+                              'variance_scaling'])
+def test_statefulness(initializer):
+    # Test that calling a same seeded random initializer
+    # in succession results in different values.
+    init = initializer(seed=1337)
+    samples = [init((2, 2)) for _ in range(2)]
+    samples = [K.get_value(K.variable(x)) for x in samples]
+    assert np.mean(np.abs(samples[0] - samples[1])) > 0.
 
 
 if __name__ == '__main__':

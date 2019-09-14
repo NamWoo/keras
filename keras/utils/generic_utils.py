@@ -501,10 +501,10 @@ def unpack_singleton(x):
 
     Otherwise return the iterable.
 
-    # Argument:
+    # Argument
         x: A list or tuple.
 
-    # Returns:
+    # Returns
         The same iterable or the first element.
     """
     if len(x) == 1:
@@ -613,3 +613,11 @@ def transpose_shape(shape, target_format, spatial_axes):
         raise ValueError('The `data_format` argument must be one of '
                          '"channels_first", "channels_last". Received: ' +
                          str(target_format))
+
+
+def check_for_unexpected_keys(name, input_dict, expected_values):
+    unknown = set(input_dict.keys()).difference(expected_values)
+    if unknown:
+        raise ValueError('Unknown entries in {} dictionary: {}. Only expected '
+                         'following keys: {}'.format(name, list(unknown),
+                                                     expected_values))

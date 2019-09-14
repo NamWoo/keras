@@ -1,4 +1,3 @@
-sudo: required
 dist: trusty
 language: python
 cache:
@@ -6,20 +5,26 @@ cache:
     - $HOME/.theano
 matrix:
     include:
-        - python: 2.7
-          env: KERAS_BACKEND=tensorflow TEST_MODE=INTEGRATION_TESTS PIL=Pil
         - python: 3.6
-          env: KERAS_BACKEND=tensorflow TEST_MODE=PEP8_DOC PIL=Pillow
-        - python: 2.7
-          env: KERAS_BACKEND=tensorflow
+          env: KERAS_BACKEND=tensorflow MODE=INTEGRATION_TESTS PIL=Pillow
         - python: 3.6
-          env: KERAS_BACKEND=tensorflow
+          env: KERAS_BACKEND=tensorflow MODE=PEP8_DOC PIL=Pillow
+        - python: 3.6
+          env: KERAS_BACKEND=tensorflow MODE=API
         - python: 2.7
+          env: KERAS_BACKEND=tensorflow MODE=TF1
+        - python: 3.6
+          env: KERAS_BACKEND=tensorflow MODE=TF1
+        - python: 2.7
+          env: KERAS_BACKEND=tensorflow MODE=TF2
+        - python: 3.6
+          env: KERAS_BACKEND=tensorflow MODE=TF2
+        - python: 2.7
+          env: KERAS_BACKEND=theano THEANO_FLAGS=optimizer=fast_compile MKL="mkl mkl-service" RUN_ONLY_BACKEND_TESTS=1
+        - python: 3.6
           env: KERAS_BACKEND=theano THEANO_FLAGS=optimizer=fast_compile MKL="mkl mkl-service"
-        - python: 3.6
-          env: KERAS_BACKEND=theano THEANO_FLAGS=optimizer=fast_compile MKL="mkl mkl-service"
         - python: 2.7
-          env: KERAS_BACKEND=cntk PYTHONWARNINGS=ignore
+          env: KERAS_BACKEND=cntk PYTHONWARNINGS=ignore RUN_ONLY_BACKEND_TESTS=1
         - python: 3.6
           env: KERAS_BACKEND=cntk PYTHONWARNINGS=ignore
 install:
@@ -41,6 +46,7 @@ install:
 
   - travis_retry conda create -q -n test-environment python=$TRAVIS_PYTHON_VERSION
   - source activate test-environment
+
   - travis_retry pip install --only-binary=numpy,scipy,pandas numpy nose scipy h5py theano pytest pytest-pep8 pandas --progress-bar off
   - pip install keras_applications keras_preprocessing --progress-bar off
 
@@ -53,24 +59,25 @@ install:
   - pip install -e .[tests] --progress-bar off
 
   # install TensorFlow (CPU version).
-  - pip install tensorflow==1.9 --progress-bar off
+  - if [[ "$MODE" == "TF2" ]]; then
+    pip install tf-nightly-2.0-preview --progress-bar off;
+    else
+    pip install tensorflow==1.14.0 --progress-bar off;
+    fi
 
   # install cntk
-  - if [[ "$KERAS_BACKEND" == "cntk" ]] || [[ "$TEST_MODE" == "PEP8_DOC" ]]; then
+  - if [[ "$KERAS_BACKEND" == "cntk" ]] || [[ "$MODE" == "PEP8_DOC" ]] || [[ "$MODE" == "API" ]]; then
       ./.travis/install_cntk.sh;
     fi
 
   # Remove the current backend from the coverage exclusion.
   - sed -i "\/keras\/backend\/${KERAS_BACKEND}_backend.py/d" .coveragerc
 
-  # detect whether core files are changed or not
-  - export CORE_CHANGED=False;
-  - for entry in `git diff --name-only HEAD~1`; do if [[ "$entry" == "keras/backend/"* ]] || [[ "$entry" == "keras/engine/"* ]] || [[ "$entry" == "keras/layers/"* ]]; then export CORE_CHANGED=True; fi; done
-  - export APP_CHANGED=False;
-  - for entry in `git diff --name-only HEAD~1`; do if [[ "$entry" == "keras/applications/"* ]]; then export APP_CHANGED=True; fi; done
-
   # install mkdocs
   - pip install mkdocs --progress-bar off
+
+  # install pyux
+  - pip install pyux
 
 # command to run tests
 script:
@@ -82,10 +89,14 @@ script:
   # set up keras backend
   - sed -i -e 's/"backend":[[:space:]]*"[^"]*/"backend":\ "'$KERAS_BACKEND'/g' ~/.keras/keras.json;
   - echo -e "Running tests with the following config:\n$(cat ~/.keras/keras.json)"
-  - if [[ "$TEST_MODE" == "INTEGRATION_TESTS" ]]; then
+  - if [[ "$MODE" == "INTEGRATION_TESTS" ]]; then
       PYTHONPATH=$PWD:$PYTHONPATH py.test tests/integration_tests;
-    elif [[ "$TEST_MODE" == "PEP8_DOC" ]]; then
-      PYTHONPATH=$PWD:$PYTHONPATH py.test --pep8 -m pep8 -n0 && py.test tests/test_documentation.py && cd docs && python autogen.py && mkdocs build;
+    elif [[ "$MODE" == "PEP8_DOC" ]]; then
+      PYTHONPATH=$PWD:$PYTHONPATH py.test --pep8 -m pep8 -n0 && py.test tests/docs;
+    elif [[ "$MODE" == "API" ]]; then
+      PYTHONPATH=$PWD:$PYTHONPATH pip install git+git://www.github.com/keras-team/keras.git && python update_api.py && pip install -e .[tests] --progress-bar off && py.test tests/test_api.py;
+    elif [[ "$RUN_ONLY_BACKEND_TESTS" == "1" ]]; then
+      PYTHONPATH=$PWD:$PYTHONPATH py.test  tests/keras/backend/;
     else
-      PYTHONPATH=$PWD:$PYTHONPATH py.test tests/ --ignore=tests/integration_tests --ignore=tests/test_documentation.py --ignore=tests/keras/legacy/layers_test.py --cov-config .coveragerc --cov=keras tests/;
+      PYTHONPATH=$PWD:$PYTHONPATH py.test tests/ --ignore=tests/integration_tests --ignore=tests/docs --ignore=tests/keras/legacy/layers_test.py --ignore=tests/test_api.py --cov-config .coveragerc --cov=keras tests/;
     fi

@@ -6,7 +6,7 @@ from __future__ import print_function
 import numpy as np
 import scipy.signal as signal
 import scipy as sp
-from keras.backend import floatx
+from .common import floatx
 from keras.utils.generic_utils import transpose_shape
 from keras.utils import to_categorical
 
@@ -277,7 +277,7 @@ def relu(x, alpha=0., max_value=None, threshold=0.):
 def switch(condition, then_expression, else_expression):
     cond_float = condition.astype(floatx())
     while cond_float.ndim < then_expression.ndim:
-        cond_float = cond_float[..., None]
+        cond_float = cond_float[..., np.newaxis]
     return cond_float * then_expression + (1 - cond_float) * else_expression
 
 
@@ -314,6 +314,12 @@ def softmax(x, axis=-1):
 def l2_normalize(x, axis=-1):
     y = np.max(np.sum(x ** 2, axis, keepdims=True), axis, keepdims=True)
     return x / np.sqrt(y)
+
+
+def in_top_k(predictions, targets, k):
+    top_k = np.argsort(-predictions)[:, :k]
+    targets = targets.reshape(-1, 1)
+    return np.any(targets == top_k, axis=-1)
 
 
 def binary_crossentropy(target, output, from_logits=False):
@@ -366,7 +372,7 @@ def std(x, axis=None, keepdims=False):
 def logsumexp(x, axis=None, keepdims=False):
     if isinstance(axis, list):
         axis = tuple(axis)
-    return sp.misc.logsumexp(x, axis=axis, keepdims=keepdims)
+    return sp.special.logsumexp(x, axis=axis, keepdims=keepdims)
 
 
 def sum(x, axis=None, keepdims=False):
@@ -520,6 +526,10 @@ def constant(value, dtype=None, shape=None, name=None):
 def print_tensor(x, message=''):
     print(x, message)
     return x
+
+
+def batch_normalization(x, mean, var, beta, gamma, axis=-1, epsilon=0.001):
+    return ((x - mean) / sqrt(var + epsilon)) * gamma + beta
 
 
 def dot(x, y):
@@ -678,7 +688,11 @@ def ones_like(x, dtype=floatx(), name=None):
 
 
 def eye(size, dtype=None, name=None):
-    return np.eye(size, dtype=dtype)
+    if isinstance(size, (list, tuple)):
+        n, m = size
+    else:
+        n, m = size, size
+    return np.eye(n, m, dtype=dtype)
 
 
 def resize_images(x, height_factor, width_factor, data_format):
@@ -707,7 +721,8 @@ def one_hot(indices, num_classes):
     return to_categorical(indices, num_classes)
 
 
-def ctc_decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1):
+def ctc_decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1,
+               merge_repeated=False):
     num_samples = y_pred.shape[0]
     num_classes = y_pred.shape[-1]
     log_prob = np.zeros((num_samples, 1))

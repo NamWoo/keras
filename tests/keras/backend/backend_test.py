@@ -5,7 +5,6 @@ import scipy.sparse as sparse
 import warnings
 
 from keras import backend as K
-from keras.backend import floatx, set_floatx, variable
 from keras.utils.conv_utils import convert_kernel
 from keras.backend import numpy_backend as KNP
 
@@ -35,12 +34,22 @@ elif K.backend() == 'cntk':
 else:
     WITH_NP = [KTF, KNP]
 
+if K.backend() == 'cntk':
+    supports_sparse = False
+elif K.backend() == 'theano' and not KTH.th_sparse_module:
+    supports_sparse = False
+elif K.backend() == 'tensorflow':
+    # Must wait for tf.keras to support sparse ops.
+    supports_sparse = False
+else:
+    supports_sparse = True
+
 
 def check_dtype(var, dtype):
-    if K._BACKEND == 'theano':
-        assert var.dtype == dtype
+    if K.backend() == 'tensorflow':
+        assert dtype in str(var.dtype.name)
     else:
-        assert var.dtype.name == '%s_ref' % dtype
+        assert dtype in str(var.dtype)
 
 
 def cntk_func_tensors(function_name, shapes_or_vals, **kwargs):
@@ -203,8 +212,11 @@ def check_rnn_operation(step_function_k,
         constants=constants_np,
         **kwargs)
     # note that numpy reference implementation is independent of `unroll` argument
-
-    for unroll in [True, False]:
+    if 'unroll' in kwargs:
+        unroll_options = [kwargs.pop('unroll')]
+    else:
+        unroll_options = [True, False]
+    for unroll in unroll_options:
         last_output_k, output_k, last_states_k = K.rnn(
             step_function_k,
             inputs_k,
@@ -243,24 +255,18 @@ class TestBackend(object):
         with pytest.raises(ValueError):
             K.set_learning_phase(2)
 
-    def test_eye(self):
+    def test_creation_operations(self):
         check_single_tensor_operation('eye', 3, WITH_NP, shape_or_val=False)
+        check_single_tensor_operation('eye', (3, 2), WITH_NP, shape_or_val=False)
+        check_single_tensor_operation('eye', (3, 4), WITH_NP, shape_or_val=False)
 
-    def test_ones(self):
         check_single_tensor_operation('ones', (3, 5, 10, 8),
                                       WITH_NP, shape_or_val=False)
-
-    def test_zeros(self):
         check_single_tensor_operation('zeros', (3, 5, 10, 8),
                                       WITH_NP, shape_or_val=False)
 
-    def test_ones_like(self):
-        check_single_tensor_operation('ones_like', (3, 5, 10, 8),
-                                      WITH_NP, shape_or_val=True)
-
-    def test_zeros_like(self):
-        check_single_tensor_operation('zeros_like', (3, 5, 10, 8),
-                                      WITH_NP, shape_or_val=True)
+        check_single_tensor_operation('ones_like', (3, 5, 10, 8), WITH_NP)
+        check_single_tensor_operation('zeros_like', (3, 5, 10, 8), WITH_NP)
 
     def test_linear_operations(self):
         check_two_tensor_operation('dot', (4, 2), (2, 4), WITH_NP)
@@ -289,8 +295,8 @@ class TestBackend(object):
 
         check_single_tensor_operation('transpose', (4, 2), WITH_NP)
         check_single_tensor_operation('reverse', (4, 3, 2), WITH_NP, axes=1)
-        if K.backend() != 'cntk':
-            check_single_tensor_operation('reverse', (4, 3, 2), WITH_NP, axes=(1, 2))
+        check_single_tensor_operation('reverse', (4, 3, 2), WITH_NP, axes=(1, 2))
+        check_single_tensor_operation('reverse', (4, 3, 2), WITH_NP, axes=(0, -1))
 
     def test_random_variables(self):
         check_single_tensor_operation('random_uniform_variable', (2, 3), WITH_NP,
@@ -368,9 +374,6 @@ class TestBackend(object):
             assert_allclose(z, z_np, atol=1e-05)
 
     def test_shape_operations(self):
-        check_two_tensor_operation('concatenate', (4, 3), (4, 2), WITH_NP,
-                                   axis=-1, concat_args=True)
-
         check_single_tensor_operation('reshape', (4, 2), WITH_NP, shape=(8, 1))
         check_single_tensor_operation('permute_dimensions', (4, 2, 3), WITH_NP,
                                       pattern=(2, 0, 1))
@@ -421,10 +424,11 @@ class TestBackend(object):
                     assert y._keras_shape == K.int_shape(y)
 
     def test_tile(self):
-        shape = (3, 4)
-        arr = np.arange(np.prod(shape)).reshape(shape)
-        check_single_tensor_operation('tile', arr, WITH_NP, n=[2, 1])
-        check_single_tensor_operation('tile', (2, 5), WITH_NP, n=[5, 2])
+        check_single_tensor_operation('tile', (3, 4), WITH_NP, n=2)
+        check_single_tensor_operation('tile', (3, 4), WITH_NP, n=(2, 1))
+        check_single_tensor_operation('tile', (3, 4, 5), WITH_NP, n=2)
+        check_single_tensor_operation('tile', (3, 4, 5), WITH_NP, n=(1, 2))
+        check_single_tensor_operation('tile', (3, 4, 5), WITH_NP, n=(3, 1, 2))
 
         # test theano shape inference when
         # input shape has None entries
@@ -468,13 +472,22 @@ class TestBackend(object):
         if function_name == 'get_value':
             assert_list_pairwise(v_list)
         else:
-            assert_list_pairwise(v_list, shape=False, allclose=False, itself=True)
+            assert_list_pairwise(v_list,
+                                 shape=False,
+                                 allclose=False,
+                                 itself=True)
 
-    def test_print_tensor(self):
-        check_single_tensor_operation('print_tensor', (), WITH_NP)
-        check_single_tensor_operation('print_tensor', (2,), WITH_NP)
-        check_single_tensor_operation('print_tensor', (4, 3), WITH_NP)
-        check_single_tensor_operation('print_tensor', (1, 2, 3), WITH_NP)
+    def test_print_tensor(self, capsys):
+        # TODO: somehow this capture mechanism doesn't work for TF
+        # even though the TF op does print to stdout.
+        for k in [KTH]:
+            x = k.placeholder((1, 1))
+            y = k.print_tensor(x, 'msg')
+            fn = k.function([x], [y])
+            _ = fn([np.ones((1, 1))])
+            out, err = capsys.readouterr()
+            # Theano inserts "__str__ = " for no good reason
+            assert out.replace('__str__ = ', '') == 'msg [[1.]]\n'
 
     def test_elementwise_operations(self):
         check_single_tensor_operation('max', (4, 2), WITH_NP)
@@ -498,11 +511,6 @@ class TestBackend(object):
         check_single_tensor_operation('std', (4, 2), WITH_NP)
         check_single_tensor_operation('std', (4, 2), WITH_NP, axis=1, keepdims=True)
         check_single_tensor_operation('std', (4, 2, 3), WITH_NP, axis=[1, -1])
-
-        check_single_tensor_operation('logsumexp', (4, 2), WITH_NP)
-        check_single_tensor_operation('logsumexp', (4, 2),
-                                      WITH_NP, axis=1, keepdims=True)
-        check_single_tensor_operation('logsumexp', (4, 2, 3), WITH_NP, axis=[1, -1])
 
         check_single_tensor_operation('prod', (4, 2), WITH_NP)
         check_single_tensor_operation('prod', (4, 2), WITH_NP, axis=1, keepdims=True)
@@ -546,12 +554,18 @@ class TestBackend(object):
         check_two_tensor_operation('maximum', (4, 2), (4, 2), WITH_NP)
         check_two_tensor_operation('minimum', (4, 2), (4, 2), WITH_NP)
 
-    @pytest.mark.skipif(K.backend() == 'cntk', reason='cntk does not support '
-                                                      'cumsum and cumprod yet')
-    def test_cumsum_cumprod(self):
+    # assumes first uid will always be the same
+    def test_reset_uids(self):
+        first = K.get_uid()
+        K.get_uid()
+        K.reset_uids()
+        assert K.get_uid() == first
+
+    def test_cumsum(self):
         check_single_tensor_operation('cumsum', (4, 2), WITH_NP)
         check_single_tensor_operation('cumsum', (4, 2), WITH_NP, axis=1)
 
+    def test_cumprod(self):
         check_single_tensor_operation('cumprod', (4, 2), WITH_NP)
         check_single_tensor_operation('cumprod', (4, 2), WITH_NP, axis=1)
 
@@ -562,11 +576,47 @@ class TestBackend(object):
     def test_log(self):
         check_single_tensor_operation('log', (4, 2), WITH_NP)
 
+    @pytest.mark.skipif(K.backend() != 'tensorflow',
+                        reason='theano returns tuples for updates; cntk buggy')
+    def test_update(self):
+        x = np.ones((3, 4))
+        x_var = K.variable(x)
+        new_x = np.random.random((3, 4))
+
+        op = K.update(x_var, new_x)
+        K.eval(op)
+
+        assert_allclose(new_x, K.eval(x_var), atol=1e-05)
+
+    @pytest.mark.skipif(K.backend() == 'theano',
+                        reason='theano returns tuples for update ops')
+    def test_update_add(self):
+        x = np.ones((3, 4))
+        x_var = K.variable(x)
+        increment = np.random.random((3, 4))
+
+        op = K.update_add(x_var, increment)
+        K.eval(op)
+
+        assert_allclose(x + increment, K.eval(x_var), atol=1e-05)
+
+    @pytest.mark.skipif(K.backend() == 'theano',
+                        reason='theano returns tuples for update ops')
+    def test_update_sub(self):
+        x = np.ones((3, 4))
+        x_var = K.variable(x)
+        decrement = np.random.random((3, 4))
+
+        op = K.update_sub(x_var, decrement)
+        K.eval(op)
+
+        assert_allclose(x - decrement, K.eval(x_var), atol=1e-05)
+
     @pytest.mark.skipif(K.backend() == 'cntk',
                         reason='cntk doesn\'t support gradient in this way.')
     def test_gradient(self):
         val = np.random.random((4, 2))
-        x_list = [k.variable(val) for k in [KTH, KTF]]
+        x_list = [k.placeholder(shape=(4, 2)) for k in [KTH, KTF]]
         z_list = []
         zero_list = []
         for x, k in zip(x_list, [KTH, KTF]):
@@ -574,9 +624,12 @@ class TestBackend(object):
             loss = k.sum(exp)
             zero_loss = k.stop_gradient(loss)
             grad = k.gradients(loss, [exp])
+
             zero_grad = k.gradients(loss + zero_loss, [exp])
-            z_list.append(k.eval(grad[0]))
-            zero_list.append(k.eval(zero_grad[0]))
+            grad_eval_fn = k.function([x], [grad[0]])
+            zero_grad_eval_fn = k.function([x], [zero_grad[0]])
+            z_list.append(grad_eval_fn([val])[0])
+            zero_list.append(zero_grad_eval_fn([val])[0])
 
         assert_list_pairwise(z_list)
         assert_list_pairwise(zero_list)
@@ -608,7 +661,9 @@ class TestBackend(object):
             x_list.append(x)
             y = k.placeholder(ndim=2)
             exp = k.square(x) + y
-            update = x * 2
+            # Need to use `identity` to make this symbolic
+            # (TODO: fix in tf.keras)
+            update = k.identity(x) * 2
             f = k.function([y], [exp], updates=[(x, update)])
             f_list.append(f)
 
@@ -618,7 +673,7 @@ class TestBackend(object):
         new_val_list = [k.get_value(x) for x, k in zip(x_list, test_backend)]
         assert_list_pairwise(new_val_list)
 
-    @pytest.mark.skipif(K.backend() != 'tensorflow',
+    @pytest.mark.skipif(K.backend() != 'tensorflow' or not KTF._is_tf_1(),
                         reason='Uses the `fetches` argument.')
     def test_function_tf_fetches(self):
         # Additional operations can be passed to tf.Session().run() via its
@@ -640,7 +695,7 @@ class TestBackend(object):
         assert output == [30.]
         assert K.get_session().run(fetches=[x, y]) == [11., 5.]
 
-    @pytest.mark.skipif(K.backend() != 'tensorflow',
+    @pytest.mark.skipif(K.backend() != 'tensorflow' or not KTF._is_tf_1(),
                         reason='Uses the `feed_dict` argument.')
     def test_function_tf_feed_dict(self):
         # Additional substitutions can be passed to `tf.Session().run()` via its
@@ -671,7 +726,7 @@ class TestBackend(object):
         assert output == [21.]
         assert K.get_session().run(fetches=[x, y]) == [30., 40.]
 
-    @pytest.mark.skipif(K.backend() != 'tensorflow',
+    @pytest.mark.skipif(K.backend() != 'tensorflow' or not KTF._is_tf_1(),
                         reason='Uses the `options` and `run_metadata` arguments.')
     def test_function_tf_run_options_with_run_metadata(self):
         from tensorflow.core.protobuf import config_pb2
@@ -748,6 +803,42 @@ class TestBackend(object):
                                 mask_np=kwargs.pop('mask', None),
                                 **kwargs)
 
+    @pytest.mark.skipif(K.backend() == 'theano', reason='Not supported')
+    def test_rnn_unroll_with_len_1(self):
+        num_samples = 4
+        input_dim = 5
+        output_dim = 3
+
+        _, x = parse_shape_or_val((num_samples, 1, input_dim))
+        _, h0 = parse_shape_or_val((num_samples, output_dim))
+        _, wi = parse_shape_or_val((input_dim, output_dim))
+        _, wh = parse_shape_or_val((output_dim, output_dim))
+
+        wi_k = K.variable(wi)
+        wh_k = K.variable(wh)
+
+        def get_step_function(backend, w_i, w_h):
+
+            def simple_rnn(inputs, states):
+                assert len(states) == 1
+                h = states[0]
+                y = backend.dot(inputs, w_i) + backend.dot(h, w_h)
+                return y, [y]
+
+            return simple_rnn
+
+        kwargs_list = [
+            {'go_backwards': False},
+            {'go_backwards': True},
+        ]
+        for kwargs in kwargs_list:
+            check_rnn_operation(step_function_k=get_step_function(K, wi_k, wh_k),
+                                step_function_np=get_step_function(KNP, wi, wh),
+                                inputs_np=x,
+                                initial_states_np=[h0],
+                                unroll=True,
+                                **kwargs)
+
     def test_rnn_additional_states(self):
         # implement a simple RNN with an additional state
         # whose shape is different from that of the output
@@ -813,17 +904,15 @@ class TestBackend(object):
             return simple_no_states
 
         kwargs_list = [
-            {'go_backwards': False, 'mask': None},
-            {'go_backwards': True, 'mask': None},
-            {'go_backwards': False, 'mask': mask},
-            {'go_backwards': True, 'mask': mask},
+            {'go_backwards': False},
+            {'go_backwards': True},
         ]
         for kwargs in kwargs_list:
             check_rnn_operation(step_function_k=get_step_function(K, wi_k),
                                 step_function_np=get_step_function(KNP, wi),
                                 inputs_np=x,
                                 initial_states_np=[],
-                                mask_np=kwargs.pop('mask', None),
+                                mask_np=None,
                                 **kwargs)
 
     def test_rnn_constants(self):
@@ -890,8 +979,8 @@ class TestBackend(object):
         expected_outputs = inputs_vals.copy()
         # but for the second sample all outputs in masked region should be the same
         # as last output before masked region
-        expected_outputs[1, -mask_last_num_timesteps:] = \
-            expected_outputs[1, -(mask_last_num_timesteps + 1)]
+        expected_outputs[1, -mask_last_num_timesteps:] = expected_outputs[
+            1, -(mask_last_num_timesteps + 1)]
 
         expected_state = initial_state_vals.copy()
         # first state should be incremented for every timestep (no masking)
@@ -900,9 +989,9 @@ class TestBackend(object):
         expected_state[1] += (num_timesteps - mask_last_num_timesteps)
 
         # verify same expected output for `unroll=true/false`
-        inputs = K.variable(inputs_vals)
-        initial_states = [K.variable(initial_state_vals)]
-        mask = K.variable(mask_vals)
+        inputs = K.constant(inputs_vals)
+        initial_states = [K.constant(initial_state_vals)]
+        mask = K.constant(mask_vals)
         for unroll in [True, False]:
             last_output, outputs, last_states = K.rnn(
                 step_function,
@@ -935,9 +1024,9 @@ class TestBackend(object):
         # same as the second to final output (before masked region)
         expected_outputs[-1, -1] = expected_outputs[-1, -2]
 
-        inputs = K.variable(inputs_vals)
-        initial_states = [K.variable(initial_state_vals)]
-        mask = K.variable(mask_vals)
+        inputs = K.constant(inputs_vals)
+        initial_states = [K.constant(initial_state_vals)]
+        mask = K.constant(mask_vals)
         for unroll in [True, False]:
             last_output, outputs, last_states = K.rnn(
                 step_function,
@@ -981,29 +1070,21 @@ class TestBackend(object):
             # not updated last timestep:
             assert_allclose(K.eval(last_states[0]), expected_last_state)
 
-    @pytest.mark.parametrize('x_np,axis,keepdims', [
-        (np.array([1.1, 0.8, 0.9]), 0, False),
-        (np.array([[1.1, 0.8, 0.9]]), 0, False),
-        (np.array([[1.1, 0.8, 0.9]]), 1, False),
-        (np.array([[1.1, 0.8, 0.9]]), -1, False),
-        (np.array([[1.1, 0.8, 0.9]]), 1, True),
-        (np.array([[1.1], [1.2]]), 0, False),
-        (np.array([[1.1], [1.2]]), 1, False),
-        (np.array([[1.1], [1.2]]), -1, False),
-        (np.array([[1.1], [1.2]]), -1, True),
-        (np.array([[1.1, 1.2, 1.3], [0.9, 0.7, 1.4]]), None, False),
-        (np.array([[1.1, 1.2, 1.3], [0.9, 0.7, 1.4]]), 0, False),
-        (np.array([[1.1, 1.2, 1.3], [0.9, 0.7, 1.4]]), 1, False),
-        (np.array([[1.1, 1.2, 1.3], [0.9, 0.7, 1.4]]), -1, False),
-    ])
-    def test_logsumexp(self, x_np, axis, keepdims):
-        '''
-        Check if K.logsumexp works properly for values close to one.
-        '''
-        x = K.variable(x_np)
-        assert_allclose(K.eval(K.logsumexp(x, axis=axis, keepdims=keepdims)),
-                        np.log(np.sum(np.exp(x_np), axis=axis, keepdims=keepdims)),
-                        rtol=1e-5)
+    @pytest.mark.parametrize('shape', [(3, ), (1, 3), (2, 1), (4, 2), (4, 2, 3)])
+    def test_logsumexp(self, shape):
+        check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=None)
+        check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=0)
+        check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=-1)
+        check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=-1,
+                                      keepdims=True)
+        if len(shape) > 1:
+            check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=1)
+            check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=1,
+                                          keepdims=True)
+        if len(shape) > 2:
+            check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=[1, -1])
+            check_single_tensor_operation('logsumexp', shape, WITH_NP, axis=[1, -1],
+                                          keepdims=True)
 
     @pytest.mark.skipif(K.backend() != 'tensorflow',
                         reason='The optimization is applied only with TensorFlow.')
@@ -1027,8 +1108,6 @@ class TestBackend(object):
         # non scalar
         shapes = []
         shapes.append([(4, 3, 2), (4, 3, 2), (4, 3, 2)])
-        shapes.append([(4, 3,), (4, 3, 2), (4, 3, 2)])
-        shapes.append([(4,), (4, 3, 2), (4, 3, 2)])
         for s in shapes:
             z_list = []
             arrays = list(map(np.random.random, s))
@@ -1089,31 +1168,36 @@ class TestBackend(object):
         check_single_tensor_operation('softmax', (4, 5, 3), WITH_NP, axis=1)
         check_single_tensor_operation('softmax', (4, 5, 3, 10), WITH_NP, axis=2)
 
-        check_two_tensor_operation('binary_crossentropy', (4, 2), (4, 2),
-                                   WITH_NP, from_logits=True)
-        # cross_entropy call require the label is a valid probability distribution,
-        # otherwise it is garbage in garbage out...
-        # due to the algo difference, we can't guarantee CNTK has the same result
-        # on the garbage input.
-        # so create a separate test case for valid label input
-        if K.backend() != 'cntk':
-            check_two_tensor_operation('categorical_crossentropy', (4, 2), (4, 2),
-                                       WITH_NP, from_logits=True)
-        xval = np.asarray([[0.26157712, 0.0432167], [-0.43380741, 0.30559841],
-                           [0.20225059, -0.38956559], [-0.13805378, 0.08506755]],
-                          dtype=np.float32)
-        yval = np.asarray([[0.46221867, 0.53778133], [0.51228984, 0.48771016],
-                           [0.64916514, 0.35083486], [0.47028078, 0.52971922]],
-                          dtype=np.float32)
-        check_two_tensor_operation('categorical_crossentropy', yval, xval, WITH_NP,
-                                   cntk_two_dynamicity=True, from_logits=True)
-        check_two_tensor_operation('binary_crossentropy', (4, 2), (4, 2),
-                                   WITH_NP, from_logits=False)
-        check_two_tensor_operation('categorical_crossentropy', (4, 2), (4, 2),
-                                   WITH_NP, from_logits=False)
-
         check_single_tensor_operation('l2_normalize', (4, 3), WITH_NP, axis=-1)
         check_single_tensor_operation('l2_normalize', (4, 3), WITH_NP, axis=1)
+
+    def test_crossentropy(self):
+        # toy label matrix (4 samples, 2 classes)
+        label = np.array([[.4, .6], [.3, .7], [.1, .9], [.2, .8]], dtype=np.float32)
+        binary_targets = np.array([[.3, .7], [.2, .8], [.4, .6], [.1, .9]],
+                                  dtype=np.float32)
+        categorical_targets = np.array([[1, 0], [1, 0], [0, 1], [0, 1]],
+                                       dtype=np.float32)
+        check_two_tensor_operation(
+            'binary_crossentropy', label, binary_targets, WITH_NP)
+        check_two_tensor_operation('binary_crossentropy', label, (4, 2),
+                                   WITH_NP, from_logits=True)
+        check_two_tensor_operation(
+            'categorical_crossentropy', label, categorical_targets,
+            WITH_NP, cntk_two_dynamicity=True)
+        check_two_tensor_operation('categorical_crossentropy', label, (4, 2),
+                                   WITH_NP, cntk_two_dynamicity=True,
+                                   from_logits=True)
+
+        # toy label matrix (2 samples, 3 classes)
+        label = np.array([[.4, .1, .5], [.2, .6, .2]], dtype=np.float32)
+        categorical_targets = np.array([[0, 1, 0], [1, 0, 0]], dtype=np.float32)
+        check_two_tensor_operation(
+            'categorical_crossentropy', label, categorical_targets,
+            WITH_NP, cntk_two_dynamicity=True)
+        check_two_tensor_operation('categorical_crossentropy', label, (2, 3),
+                                   WITH_NP, cntk_two_dynamicity=True,
+                                   from_logits=True)
 
     def test_in_top_k(self):
         batch_size = 20
@@ -1125,10 +1209,10 @@ class TestBackend(object):
 
         # (k == 0 or k > num_classes) does not raise an error
         # but just return an unmeaningful tensor.
-        for k in range(num_classes + 1):
+        for k in range(1, 2 if K.backend() == 'cntk' else (num_classes + 1)):
             z_list = [b.eval(b.in_top_k(b.variable(predictions, dtype='float32'),
                                         b.variable(targets, dtype='int32'), k))
-                      for b in [KTH, KTF]]
+                      for b in WITH_NP]
             assert_list_pairwise(z_list)
 
         # Identical prediction test case:
@@ -1140,10 +1224,10 @@ class TestBackend(object):
             predictions[i, idx_identical] = predictions[i, 0]
         targets = np.zeros(batch_size, dtype='int32')
 
-        for k in range(1, num_classes + 1):
+        for k in range(1, 2 if K.backend() == 'cntk' else (num_classes + 1)):
             z_list = [b.eval(b.in_top_k(b.variable(predictions, dtype='float32'),
                                         b.variable(targets, dtype='int32'), k))
-                      for b in [KTH, KTF]]
+                      for b in WITH_NP]
             assert_list_pairwise(z_list)
 
     @pytest.mark.parametrize('op,input_shape,kernel_shape,padding,data_format', [
@@ -1184,7 +1268,7 @@ class TestBackend(object):
             output_shape=output_shape, padding=padding, data_format=data_format,
             cntk_dynamicity=True)
 
-    @pytest.mark.skipif((K.backend() == 'cntk' and K.dev.type() == 0),
+    @pytest.mark.skipif((K.backend() == 'cntk' and KC.dev.type() == 0),
                         reason='cntk only supports dilated conv on GPU')
     @pytest.mark.parametrize(
         'op,input_shape,kernel_shape,padding,data_format,dilation_rate', [
@@ -1211,7 +1295,7 @@ class TestBackend(object):
             padding=padding, data_format=data_format,
             dilation_rate=dilation_rate, cntk_dynamicity=True)
 
-    @pytest.mark.skipif((K.backend() == 'cntk' and K.dev.type() == 0),
+    @pytest.mark.skipif((K.backend() == 'cntk' and KC.dev.type() == 0),
                         reason='cntk only supports dilated conv transpose on GPU')
     @pytest.mark.parametrize(
         'op,input_shape,kernel_shape,output_shape,padding,data_format,dilation_rate',
@@ -1324,59 +1408,42 @@ class TestBackend(object):
         assert_allclose(y1, y2, atol=1e-05)
 
     def test_random_normal(self):
-        # test standard normal as well as a normal with a different set of parameters
+        # TODO: make this a parameterized test
         for mean, std in [(0., 1.), (-10., 5.)]:
-            rand = K.eval(K.random_normal((300, 200),
-                                          mean=mean, stddev=std, seed=1337))
-            assert rand.shape == (300, 200)
+            rand = K.eval(K.random_normal((200, 200),
+                                          mean=mean,
+                                          stddev=std))
+            assert rand.shape == (200, 200)
             assert np.abs(np.mean(rand) - mean) < std * 0.015
             assert np.abs(np.std(rand) - std) < std * 0.015
-
-            # test that random_normal also generates different values when used
-            # within a function
-            r = K.random_normal((10, 10), mean=mean, stddev=std, seed=1337)
-            samples = np.array([K.eval(r) for _ in range(200)])
-            assert np.abs(np.mean(samples) - mean) < std * 0.015
-            assert np.abs(np.std(samples) - std) < std * 0.015
 
     def test_random_uniform(self):
         min_val = -1.
         max_val = 1.
-        rand = K.eval(K.random_uniform((200, 100), min_val, max_val))
-        assert rand.shape == (200, 100)
+        rand = K.eval(K.random_uniform((200, 200), min_val, max_val))
+        assert rand.shape == (200, 200)
         assert np.abs(np.mean(rand)) < 0.015
         assert max_val - 0.015 < np.max(rand) <= max_val
         assert min_val + 0.015 > np.min(rand) >= min_val
 
-        r = K.random_uniform((10, 10), minval=min_val, maxval=max_val)
-        samples = np.array([K.eval(r) for _ in range(200)])
-        assert np.abs(np.mean(samples)) < 0.015
-        assert max_val - 0.015 < np.max(samples) <= max_val
-        assert min_val + 0.015 > np.min(samples) >= min_val
-
     def test_random_binomial(self):
         p = 0.5
-        rand = K.eval(K.random_binomial((200, 100), p))
-        assert rand.shape == (200, 100)
+        rand = K.eval(K.random_binomial((200, 200), p))
+        assert rand.shape == (200, 200)
         assert np.abs(np.mean(rand) - p) < 0.015
         assert np.max(rand) == 1
         assert np.min(rand) == 0
-
-        r = K.random_binomial((10, 10), p)
-        samples = np.array([K.eval(r) for _ in range(200)])
-        assert np.abs(np.mean(samples) - p) < 0.015
-        assert np.max(samples) == 1
-        assert np.min(samples) == 0
 
     def test_truncated_normal(self):
         mean = 0.
         std = 1.
         min_val = -2.
         max_val = 2.
-        rand = K.eval(K.truncated_normal((300, 200),
-                                         mean=mean, stddev=std, seed=1337))
-        assert rand.shape == (300, 200)
-        assert np.abs(np.mean(rand) - mean) < 0.015
+        rand = K.eval(K.truncated_normal((200, 200),
+                                         mean=mean,
+                                         stddev=std))
+        assert rand.shape == (200, 200)
+        assert np.abs(np.mean(rand) - mean) < 0.016
         assert np.max(rand) <= max_val
         assert np.min(rand) >= min_val
 
@@ -1401,10 +1468,9 @@ class TestBackend(object):
         with pytest.raises(ValueError):
             K.conv3d(dummy_x_3d, dummy_w_3d, data_format='channels_middle')
 
-        if K.backend() != 'theano':
-            with pytest.raises(ValueError):
-                K.separable_conv2d(dummy_x_2d, dummy_w_2d, dummy_w1x1_2d,
-                                   data_format='channels_middle')
+        with pytest.raises(ValueError):
+            K.separable_conv2d(dummy_x_2d, dummy_w_2d, dummy_w1x1_2d,
+                               data_format='channels_middle')
 
         with pytest.raises(ValueError):
             K.depthwise_conv2d(dummy_x_2d, dummy_w_2d,
@@ -1575,6 +1641,34 @@ class TestBackend(object):
         with pytest.raises(ValueError):
             K.bias_add(x, b, data_format='channels_middle')
 
+    @pytest.mark.skipif(K.backend() == 'theano',
+                        reason='Theano behaves differently '
+                               'because of the broadcast.')
+    @pytest.mark.parametrize('axis', [1, -1])
+    @pytest.mark.parametrize('x_shape', [(3, 2, 4, 5), (3, 2, 4)])
+    def test_batch_normalization(self, axis, x_shape):
+        other_shape = [1] * len(x_shape)
+        other_shape[axis] = x_shape[axis]
+        other_shape = tuple(other_shape)
+        x_np = np.random.random(x_shape)
+        mean_np = np.random.random(other_shape)
+        var_np = np.random.random(other_shape)
+        beta_np = np.random.random(other_shape)
+        gamma_np = np.random.random(other_shape)
+        output_tensors = []
+        output_arrays = []
+        for k in WITH_NP:
+            x = k.variable(x_np)
+            mean = k.variable(mean_np)
+            var = k.variable(var_np)
+            beta = k.variable(beta_np)
+            gamma = k.variable(gamma_np)
+            output = k.batch_normalization(x, mean, var, beta, gamma, axis=axis)
+            output_tensors.append(output)
+            output_arrays.append(k.eval(output))
+        assert_list_pairwise(output_arrays)
+        assert_list_keras_shape(output_tensors, output_arrays)
+
     @pytest.mark.skipif(K.backend() != 'theano',
                         reason='Specific to Theano.')
     @pytest.mark.parametrize('x_shape', [(1, 4, 2, 3), (1, 2, 3, 4)])
@@ -1732,23 +1826,19 @@ class TestBackend(object):
         assert np.alltrue(decode_pred_np == decode_pred)
         assert np.allclose(log_prob_pred_np, log_prob_pred)
 
-    @pytest.mark.skipif(K.backend() != 'tensorflow',
-                        reason='tensorflow-way slice is '
-                        'only supported in tensorflow.')
-    @pytest.mark.parametrize('x_size', [
-        [1, 1, 3],
-        [1, 2, 3],
-        [2, 1, 3]
+    @pytest.mark.parametrize('shape,start,size', [
+        ((2, 5), (0, 1), (2, 3)),
+        ((2, 5), (1, 0), (1, 4)),
+        ((3, 2, 3), (1, 1, 0), (1, 1, 3)),
+        ((3, 2, 3), (1, 0, 0), (1, 2, 3)),
+        ((3, 2, 3), (1, 0, 0), (2, 1, 3)),
     ])
-    def test_slice(self, x_size):
-        npt = np.array([[[1, 1, 1], [2, 2, 2]],
-                       [[3, 3, 3], [4, 4, 4]],
-                       [[5, 5, 5], [6, 6, 6]]])
-        x_start = [1, 0, 0]
-        tft = K.constant(npt)
-        test_input = K.eval(K.slice(tft, x_start, x_size))
-        expected = KNP.slice(npt, x_start, x_size)
-        assert np.allclose(test_input, expected)
+    def test_slice(self, shape, start, size):
+        check_single_tensor_operation('slice', shape, WITH_NP,
+                                      start=start, size=size)
+        with pytest.raises(ValueError):
+            K.slice(K.variable(np.random.random(shape)),
+                    start=[1, 0, 0, 0], size=size)
 
     @pytest.mark.skipif(K.backend() != 'tensorflow',
                         reason='Beam search is only implemented with '
@@ -1769,22 +1859,31 @@ class TestBackend(object):
              [0.155251, 0.164444, 0.173517, 0.176138, 0.169979, 0.160671]],
             dtype=np.float32)
 
+        # Add arbitrary offset - this is fine
+        input_prob_matrix_0 = input_prob_matrix_0 + 2.0
+
         # len max_time_steps array of batch_size x depth matrices
         inputs = ([input_prob_matrix_0[t, :][np.newaxis, :]
                    for t in range(seq_len_0)] +  # Pad to max_time_steps = 8
                   2 * [np.zeros((1, depth), dtype=np.float32)])
 
-        inputs = K.variable(np.asarray(inputs).transpose((1, 0, 2)))
+        # Take exponential as we directly apply ctc_decode_beam_search
+        inputs = np.exp(inputs)
+
+        # change tensorflow order to keras backend order
+        inputs = K.variable(inputs.transpose((1, 0, 2)))
 
         # batch_size length vector of sequence_lengths
         input_length = K.variable(np.array([seq_len_0], dtype=np.int32))
-        # batch_size length vector of negative log probabilities
-        log_prob_truth = np.array([
-            0.584855,  # output beam 0
-            0.389139  # output beam 1
-        ], np.float32)[np.newaxis, :]
+        # batch_size length vector of log probabilities
+        log_prob_truth = np.array(
+            [
+                -5.811451,  # output beam 0
+                -6.63339  # output beam 1
+            ],
+            np.float32)[np.newaxis, :]
 
-        decode_truth = [np.array([1, 0]), np.array([0, 1, 0])]
+        decode_truth = [np.array([1, 0]), np.array([[1]])]
 
         beam_width = 2
         top_paths = 2
@@ -1804,6 +1903,43 @@ class TestBackend(object):
 
         assert np.allclose(log_prob_truth, log_prob_pred)
 
+    @pytest.mark.skipif(K.backend() != 'tensorflow',
+                        reason='Beam search is only implemented with '
+                               'the TensorFlow backend.')
+    def test_ctc_decode_beam_search_no_merge(self):
+        # A simple CTC probability map with some repeating characters,
+        # shape(batch, input_width, char_count)
+        # Without merging should be decoded as: "AABB", with merging as: "AB".
+        input_prob = np.array([
+            [  # blank, A ,B
+                [0, 0, 1],  # blank
+                [1, 0, 0],  # A
+                [0, 0, 1],  # blank
+                [1, 0, 0],  # A
+                [0, 1, 0],  # B
+                [0, 0, 1],  # blank
+                [0, 1, 0]  # B
+            ]
+        ])
+        input_len = np.array(input_prob.shape[0] * [input_prob.shape[1]])
+
+        def decode(merge_repeated):
+            input_prob_tensor = K.placeholder(shape=(None, None, None),
+                                              dtype='float32')
+            input_len_tensor = K.placeholder(shape=(None), dtype='int64')
+            paths_tensors, _ = K.ctc_decode(input_prob_tensor, input_len_tensor,
+                                            greedy=False, beam_width=1, top_paths=1,
+                                            merge_repeated=merge_repeated)
+            decode_func = K.function([input_prob_tensor, input_len_tensor],
+                                     paths_tensors)
+            paths = decode_func([input_prob, input_len])
+            return paths
+
+        # merged: A B
+        assert np.allclose(decode(merge_repeated=True), [np.array([[0, 1]])])
+        # not merged: A A B B
+        assert np.allclose(decode(merge_repeated=False), [np.array([[0, 0, 1, 1]])])
+
     def test_one_hot(self):
         input_length = 10
         num_classes = 20
@@ -1813,8 +1949,7 @@ class TestBackend(object):
         koh = K.eval(K.one_hot(K.variable(indices, dtype='int32'), num_classes))
         assert np.all(koh == oh)
 
-    @pytest.mark.skipif((K.backend() == 'cntk'
-                         or (K.backend() == 'theano' and not K.th_sparse_module)),
+    @pytest.mark.skipif(not supports_sparse,
                         reason='Sparse tensors are not supported in cntk '
                                'and Theano has some dependency issues for sparse.')
     def test_sparse_dot(self):
@@ -1833,8 +1968,7 @@ class TestBackend(object):
         assert k_s.shape == k_d.shape
         assert_allclose(k_s, k_d, atol=1e-05)
 
-    @pytest.mark.skipif((K.backend() == 'cntk'
-                         or (K.backend() == 'theano' and not K.th_sparse_module)),
+    @pytest.mark.skipif(not supports_sparse,
                         reason='Sparse tensors are not supported in cntk '
                                'and Theano has some dependency issues for sparse.')
     def test_sparse_concat(self):
@@ -1863,21 +1997,20 @@ class TestBackend(object):
         assert k_s_d.shape == k_d.shape
         assert_allclose(k_s_d, k_d, atol=1e-05)
 
-    def test_stack(self):
-        tensor_list = [np.random.randn(5, 4, 6, 10) for _ in range(5)]
-        stack_axis = 3
-        results = []
-        if WITH_NP[0] == KC:
-            check_two_tensor_operation('stack', (5, 4, 6, 10),
-                                       (5, 4, 6, 10), WITH_NP,
-                                       axis=stack_axis, concat_args=True)
-        else:
-            for k in WITH_NP:
-                tensor_list_var = [k.variable(tensor) for tensor in tensor_list]
-                out = k.eval(k.stack(tensor_list_var, axis=stack_axis))
-                results.append(out)
-
-            assert_list_pairwise(results)
+    @pytest.mark.parametrize('shape,shape2,axis', [
+        ((5, 2), (7, 2), 0),
+        ((5, 4, 6), (5, 3, 6), 1),
+        ((5, 4, 6, 10), (5, 4, 6, 2), 3),
+        ((5, 4, 6, 3), (5, 4, 6, 2), -1),
+    ])
+    def test_concat_operations(self, shape, shape2, axis):
+        # In stack, each array must have the same shape.
+        check_two_tensor_operation('stack', shape, shape, WITH_NP,
+                                   axis=axis, concat_args=True)
+        check_two_tensor_operation('concatenate', shape, shape2, WITH_NP,
+                                   axis=axis, concat_args=True)
+        check_two_tensor_operation('concatenate', shape, shape2, WITH_NP,
+                                   axis=axis, concat_args=True)
 
     @pytest.mark.skipif(K.backend() == 'cntk', reason='Not supported.')
     def test_map(self):
@@ -1897,7 +2030,6 @@ class TestBackend(object):
         assert_allclose(x.sum(axis=1), kx, atol=1e-05)
         assert_allclose(kx, kx2, atol=1e-05)
 
-    @pytest.mark.skipif(K.backend() == 'cntk', reason='Not supported.')
     def test_foldl(self):
         x = np.random.rand(10, 3).astype(np.float32)
         kx = K.eval(K.foldl(lambda a, b: a + b, K.variable(x)))
@@ -1905,7 +2037,6 @@ class TestBackend(object):
         assert (3,) == kx.shape
         assert_allclose(x.sum(axis=0), kx, atol=1e-05)
 
-    @pytest.mark.skipif(K.backend() == 'cntk', reason='Not supported.')
     def test_foldr(self):
         # This test aims to make sure that we walk the array from right to left
         # and checks it in the following way: multiplying left to right 1e-40
@@ -1971,70 +2102,49 @@ class TestBackend(object):
         check_two_tensor_operation('in_test_phase', (2, 3), (2, 3), WITH_NP,
                                    training=training)
 
-    def test_setfloatx_incorrect_values(self):
+    @pytest.mark.parametrize('dtype', ['', 'beerfloat', 123])
+    def test_setfloatx_incorrect_values(self, dtype):
         # Keep track of the old value
-        old_floatx = floatx()
-        # Try some incorrect values
-        initial = floatx()
-        for value in ['', 'beerfloat', 123]:
-            with pytest.raises(ValueError):
-                set_floatx(value)
-        assert floatx() == initial
-        # Restore old value
-        set_floatx(old_floatx)
+        old_floatx = K.floatx()
+        with pytest.raises(ValueError):
+            K.set_floatx(dtype)
+        assert K.floatx() == old_floatx
 
-    def test_setfloatx_correct_values(self):
+    @pytest.mark.parametrize('dtype', ['float16', 'float32', 'float64'])
+    def test_setfloatx_correct_values(self, dtype):
         # Keep track of the old value
-        old_floatx = floatx()
+        old_floatx = K.floatx()
         # Check correct values
-        for value in ['float16', 'float32', 'float64']:
-            set_floatx(value)
-            assert floatx() == value
+        K.set_floatx(dtype)
+        assert K.floatx() == dtype
+        # Make sure that changes to the global floatx are effectively
+        # taken into account by the backend.
+        check_dtype(K.variable([10]), dtype)
         # Restore old value
-        set_floatx(old_floatx)
+        K.set_floatx(old_floatx)
 
-    @pytest.mark.skipif((K.backend() == 'cntk'),
-                        reason='cntk does not support float16')
-    def test_set_floatx(self):
-        """
-        Make sure that changes to the global floatx are effectively
-        taken into account by the backend.
-        """
-        # Keep track of the old value
-        old_floatx = floatx()
+    @pytest.mark.parametrize('dtype', ['float16', 'float32', 'float64'])
+    def test_dtype(self, dtype):
+        assert K.dtype(K.variable(1, dtype=dtype)) == dtype
 
-        set_floatx('float16')
-        var = variable([10])
-        check_dtype(var, 'float16')
-
-        set_floatx('float64')
-        var = variable([10])
-        check_dtype(var, 'float64')
-
-        # Restore old value
-        set_floatx(old_floatx)
-
-    def test_dtype(self):
-        assert K.dtype(K.variable(1, dtype='float64')) == 'float64'
-        assert K.dtype(K.variable(1, dtype='float32')) == 'float32'
-        assert K.dtype(K.variable(1, dtype='float16')) == 'float16'
-
+    @pytest.mark.skipif(K.backend() == 'cntk', reason='Not supported')
     def test_variable_support_bool_dtype(self):
-        # Github issue: 7819
-        if K.backend() == 'tensorflow':
-            assert K.dtype(K.variable(1, dtype='int16')) == 'int16'
-            assert K.dtype(K.variable(False, dtype='bool')) == 'bool'
-            with pytest.raises(TypeError):
-                K.variable('', dtype='unsupported')
+        assert K.dtype(K.variable(1, dtype='int16')) == 'int16'
+        assert K.dtype(K.variable(False, dtype='bool')) == 'bool'
+        with pytest.raises(TypeError):
+            K.variable('', dtype='unsupported')
 
-    def test_clip_supports_tensor_arguments(self):
+    @pytest.mark.parametrize('shape', [(4, 2), (2, 3)])
+    def test_clip_supports_tensor_arguments(self, shape):
         # GitHub issue: 11435
-        x = K.variable([-10., -5., 0., 5., 10.])
-        min_value = K.variable([-5., -4., 0., 3., 5.])
-        max_value = K.variable([5., 4., 1., 4., 9.])
-
-        assert np.allclose(K.eval(K.clip(x, min_value, max_value)),
-                           np.asarray([-5., -4., 0., 4., 9.], dtype=np.float32))
+        _, x = parse_shape_or_val(shape)
+        _, min_val = parse_shape_or_val(shape)
+        max_val = min_val + 1.
+        x_k = K.variable(x)
+        min_val_k = K.variable(min_val)
+        max_val_k = K.variable(max_val)
+        assert np.allclose(K.eval(K.clip(x_k, min_val_k, max_val_k)),
+                           KNP.eval(KNP.clip(x, min_val, max_val)))
 
 
 if __name__ == '__main__':

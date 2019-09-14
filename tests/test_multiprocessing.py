@@ -14,7 +14,7 @@ from keras.utils import Sequence
 from keras import backend as K
 
 pytestmark = pytest.mark.skipif(
-    six.PY2 and 'TRAVIS_PYTHON_VERSION' in os.environ,
+    True,
     reason='Temporarily disabled until the use_multiprocessing problem is solved')
 
 skip_generators = pytest.mark.skipif(K.backend() in {'tensorflow', 'cntk'} and
@@ -127,7 +127,7 @@ def test_multiprocessing_training():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.fit_generator(custom_generator(),
                                 steps_per_epoch=STEPS_PER_EPOCH,
@@ -163,7 +163,7 @@ def test_multiprocessing_training():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.fit_generator(custom_generator(True),
                                 steps_per_epoch=STEPS_PER_EPOCH,
@@ -202,7 +202,7 @@ def test_multiprocessing_training():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.fit_generator(custom_generator(True),
                                 steps_per_epoch=STEPS_PER_EPOCH,
@@ -315,15 +315,14 @@ def test_multiprocessing_training_from_file(in_tmpdir):
         batch_size = 10
         n_samples = 50
 
-        arr = np.load('data.npz')
-
-        while True:
-            batch_index = np.random.randint(0, n_samples - batch_size)
-            start = batch_index
-            end = start + batch_size
-            X = arr['data'][start: end]
-            y = arr['labels'][start: end]
-            yield X, y
+        with np.load('data.npz') as arr:
+            while True:
+                batch_index = np.random.randint(0, n_samples - batch_size)
+                start = batch_index
+                end = start + batch_size
+                X = arr['data'][start: end]
+                y = arr['labels'][start: end]
+                yield X, y
 
     # Build a NN
     model = Sequential()
@@ -335,7 +334,7 @@ def test_multiprocessing_training_from_file(in_tmpdir):
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.fit_generator(custom_generator(),
                                 steps_per_epoch=STEPS_PER_EPOCH,
@@ -360,7 +359,7 @@ def test_multiprocessing_training_from_file(in_tmpdir):
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.fit_generator(custom_generator(),
                                 steps_per_epoch=STEPS_PER_EPOCH,
@@ -407,15 +406,14 @@ def test_multithreading_from_file():
         batch_size = 10
         n_samples = 50
 
-        arr = np.load('data_threads.npz')
-
-        while True:
-            batch_index = np.random.randint(0, n_samples - batch_size)
-            start = batch_index
-            end = start + batch_size
-            X = arr['data'][start: end]
-            y = arr['labels'][start: end]
-            yield X, y
+        with np.load('data_threads.npz') as arr:
+            while True:
+                batch_index = np.random.randint(0, n_samples - batch_size)
+                start = batch_index
+                end = start + batch_size
+                X = arr['data'][start: end]
+                y = arr['labels'][start: end]
+                yield X, y
 
     # Build a NN
     model = Sequential()
@@ -484,7 +482,7 @@ def test_multiprocessing_predicting():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `predict_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.predict_generator(custom_generator(),
                                     steps=STEPS,
@@ -503,7 +501,7 @@ def test_multiprocessing_predicting():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `predict_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.predict_generator(custom_generator(),
                                     steps=STEPS,
@@ -600,7 +598,7 @@ def test_multiprocessing_evaluating():
     #     process boundaries
     #       -> make sure `evaluate_generator()` raises raises ValueError
     #          exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.evaluate_generator(custom_generator(),
                                      steps=STEPS,
@@ -619,7 +617,7 @@ def test_multiprocessing_evaluating():
     #   - BUT on Windows, `multiprocessing` won't marshall generators across
     #     process boundaries -> make sure `evaluate_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.evaluate_generator(custom_generator(),
                                      steps=STEPS,
@@ -721,7 +719,7 @@ def test_multiprocessing_fit_error():
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(RuntimeError):
             model.fit_generator(custom_generator(),
                                 steps_per_epoch=samples,
@@ -744,7 +742,7 @@ def test_multiprocessing_fit_error():
     #     process boundaries -> make sure `fit_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(RuntimeError):
             model.fit_generator(custom_generator(),
                                 steps_per_epoch=samples,
@@ -861,7 +859,7 @@ def test_multiprocessing_evaluate_error():
     #     process boundaries -> make sure `evaluate_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(ValueError):
             model.evaluate_generator(custom_generator(),
                                      steps=good_batches * WORKERS + 1,
@@ -882,7 +880,7 @@ def test_multiprocessing_evaluate_error():
     #     process boundaries -> make sure `evaluate_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(RuntimeError):
             model.evaluate_generator(custom_generator(),
                                      steps=good_batches + 1,
@@ -991,7 +989,7 @@ def test_multiprocessing_predict_error():
     #     process boundaries -> make sure `predict_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(StopIteration):
             model.predict_generator(custom_generator(),
                                     steps=good_batches * WORKERS + 1,
@@ -1012,7 +1010,7 @@ def test_multiprocessing_predict_error():
     #     process boundaries -> make sure `predict_generator()` raises ValueError
     #     exception and does not attempt to run the generator.
     #   - On other platforms, make sure `RuntimeError` exception bubbles up
-    if os.name is 'nt':
+    if os.name == 'nt':
         with pytest.raises(RuntimeError):
             model.predict_generator(custom_generator(),
                                     steps=good_batches + 1,

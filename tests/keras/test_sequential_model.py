@@ -135,17 +135,18 @@ def test_sequential(in_tmpdir):
 
     model.train_on_batch(x_train[:32], y_train[:32])
 
-    loss = model.evaluate(x_test, y_test)
+    loss_np = model.evaluate(x_test, y_test)
+    predict_np = model.predict(x_test)
 
-    prediction = model.predict_generator(data_generator(x_test, y_test), 1,
-                                         max_queue_size=2, verbose=1)
-    gen_loss = model.evaluate_generator(data_generator(x_test, y_test, 50), 1,
-                                        max_queue_size=2)
-    pred_loss = K.eval(K.mean(losses.get(model.loss)(K.variable(y_test),
-                                                     K.variable(prediction))))
+    generator_pred_np = model.predict_generator(
+        data_generator(x_test, y_test), 1,
+        max_queue_size=2, verbose=1)
+    generator_loss_np = model.evaluate_generator(
+        data_generator(x_test, y_test, 50), 1,
+        max_queue_size=2)
 
-    assert(np.isclose(pred_loss, loss))
-    assert(np.isclose(gen_loss, loss))
+    assert_allclose(loss_np, generator_loss_np, atol=1e-5)
+    assert_allclose(predict_np, generator_pred_np, atol=1e-5)
 
     model.predict(x_test, verbose=0)
     model.predict_classes(x_test, verbose=0)
@@ -163,7 +164,7 @@ def test_sequential(in_tmpdir):
     os.remove(fname)
 
     nloss = model.evaluate(x_test, y_test, verbose=0)
-    assert(loss == nloss)
+    assert(loss_np == nloss)
 
     # Test serialization
     config = model.get_config()
@@ -337,6 +338,33 @@ def test_clone_functional_model():
         model, input_tensors=[input_a, input_b])
     new_model.compile('rmsprop', 'mse')
     new_model.train_on_batch(None, val_out)
+
+
+def test_clone_functional_model_with_multi_outputs():
+    input_layer = keras.Input(shape=(4,))
+
+    # Layer with single input and multiple outputs
+    layer1 = keras.layers.Lambda(lambda x: [x + 1, x],
+                                 lambda shapes: [shapes, shapes])
+    x_a, x_b = layer1(input_layer)
+
+    class SwapLayer(keras.layers.Layer):
+        def call(self, inputs, **kwargs):
+            return [inputs[1], inputs[0]]
+
+        def compute_output_shape(self, input_shape):
+            return [input_shape[1], input_shape[0]]
+
+    # Layer with multiple inputs and outputs
+    x_a, x_b = SwapLayer()([x_a, x_b])
+    model = keras.Model(inputs=[input_layer], outputs=[x_a, x_b])
+    new_model = keras.models.clone_model(model)
+
+    x_test = np.random.random((10, 4))
+    pred_a, pred_b = model.predict(x_test)
+    pred_new_a, pred_new_b = new_model.predict(x_test)
+    assert(pred_a.all() == pred_new_a.all())
+    assert(pred_b.all() == pred_new_b.all())
 
 
 def test_clone_sequential_model():

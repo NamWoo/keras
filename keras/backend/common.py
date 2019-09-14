@@ -41,8 +41,9 @@ def set_epsilon(e):
         1e-05
     ```
     """
+
     global _EPSILON
-    _EPSILON = e
+    _EPSILON = float(e)
 
 
 def floatx():
@@ -176,6 +177,16 @@ def normalize_data_format(value):
                          '"channels_first", "channels_last". Received: ' +
                          str(value))
     return data_format
+
+
+def symbolic(func):
+    """Dummy decorator used in TensorFlow 2.0 to enter the Keras graph."""
+    return func
+
+
+def eager(func):
+    """Dummy decorator used in TensorFlow 2.0 to exit the Keras graph."""
+    return func
 
 
 # Legacy methods

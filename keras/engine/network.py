@@ -48,6 +48,7 @@ class Network(Layer):
                 - ndim
                 - dtype
         trainable (boolean)
+        dtype
         input_shape
         output_shape
         weights (list of variables)
@@ -95,7 +96,7 @@ class Network(Layer):
             # Subclassed network
             self._init_subclassed_network(**kwargs)
 
-    def _base_init(self, name=None):
+    def _base_init(self, name=None, trainable=True, dtype=None):
         # The following are implemented as property functions:
         # self.trainable_weights
         # self.non_trainable_weights
@@ -112,7 +113,10 @@ class Network(Layer):
         # This acts just like the `trainable` attribute of any layer instance.
         # It does not affect users of the underlying layers, only users of the
         # Network instance.
-        self.trainable = True
+        self.trainable = trainable
+        if dtype is None:
+            dtype = K.floatx()
+        self.dtype = dtype
         self._is_compiled = False
         self._expects_training_arg = False
         self._initial_weights = None
@@ -123,10 +127,16 @@ class Network(Layer):
             self.optimizer = None
 
         # Private attributes to implement compatibility with Layer.
+        self._trainable_weights = []
+        self._non_trainable_weights = []
         self._updates = []
         self._losses = []
         self._per_input_losses = {}
         self._per_input_updates = {}
+
+        # A list of metric instances corresponding to the metric tensors added using
+        # the `add_metric` API.
+        self._metrics = []
 
         # All layers in order of horizontal graph traversal.
         # Entries are unique. Includes input and output layers.
@@ -136,7 +146,7 @@ class Network(Layer):
         self._outbound_nodes = []
         self._inbound_nodes = []
 
-    def _init_graph_network(self, inputs, outputs, name=None):
+    def _init_graph_network(self, inputs, outputs, name=None, **kwargs):
         self._uses_inputs_arg = True
         # Normalize and set self.inputs, self.outputs.
         self.inputs = to_list(inputs, allow_tuple=True)
@@ -144,7 +154,7 @@ class Network(Layer):
 
         # User-provided argument validation.
         # Check for redundancy in inputs.
-        if len(set(self.inputs)) != len(self.inputs):
+        if len(set(id(x) for x in self.inputs)) != len(self.inputs):
             raise ValueError('The list of inputs passed to the model '
                              'is redundant. '
                              'All inputs should only appear once.'
@@ -186,7 +196,7 @@ class Network(Layer):
                                  'the output of a Keras `Layer` '
                                  '(thus holding past layer metadata). '
                                  'Found: ' + str(x))
-        self._base_init(name=name)
+        self._base_init(name=name, **kwargs)
         self._compute_previous_mask = (
             has_arg(self.call, 'mask') or
             hasattr(self, 'compute_mask'))
@@ -290,8 +300,8 @@ class Network(Layer):
         for layer in self._output_layers:
             self.output_names.append(layer.name)
 
-    def _init_subclassed_network(self, name=None):
-        self._base_init(name=name)
+    def _init_subclassed_network(self, name=None, **kwargs):
+        self._base_init(name=name, **kwargs)
         self._is_graph_network = False
         self._expects_training_arg = has_arg(self.call, 'training')
         self._uses_inputs_arg = has_arg(self.call, 'inputs')
@@ -302,7 +312,7 @@ class Network(Layer):
     def __setattr__(self, name, value):
         # Automatically track layers set as Model
         # attributes for subclassed Models.
-        if isinstance(value, (Layer, Network)):
+        if isinstance(value, Layer):
             try:
                 is_graph_network = self._is_graph_network
             except AttributeError:
@@ -310,9 +320,6 @@ class Network(Layer):
                     'It looks like you are subclassing `Model` and you '
                     'forgot to call `super(YourClass, self).__init__()`.'
                     ' Always start with this line.')
-            if not is_graph_network:
-                if value not in self._layers:
-                    self._layers.append(value)
         super(Network, self).__setattr__(name, value)
 
     @property
@@ -421,8 +428,13 @@ class Network(Layer):
         # Add any potential unconditional model-level loss.
         losses += self.get_losses_for(None)
 
-        unique_tensors = list(
-            set(x for x in losses if not isinstance(x, (float, int))))
+        unique_tensors = []
+        unique_tensors_ids = set()
+        for x in losses:
+            if not isinstance(x, (float, int)):
+                if id(x) not in unique_tensors_ids:
+                    unique_tensors.append(x)
+                    unique_tensors_ids.add(id(x))
         non_tensors = [x for x in losses if isinstance(x, (float, int))]
         return unique_tensors + non_tensors
 
@@ -463,18 +475,18 @@ class Network(Layer):
     def trainable_weights(self):
         if not self.trainable:
             return []
-        weights = []
+        weights = self._trainable_weights[:]
         for layer in self.layers:
             weights += layer.trainable_weights
         return weights
 
     @property
     def non_trainable_weights(self):
-        weights = []
+        weights = self._non_trainable_weights[:]
         for layer in self.layers:
             weights += layer.non_trainable_weights
         if not self.trainable:
-            trainable_weights = []
+            trainable_weights = self._trainable_weights[:]
             for layer in self.layers:
                 trainable_weights += layer.trainable_weights
             return trainable_weights + weights
@@ -486,7 +498,7 @@ class Network(Layer):
         # Returns
             A flat list of Numpy arrays.
         """
-        weights = []
+        weights = self._trainable_weights + self._non_trainable_weights
         for layer in self.layers:
             weights += layer.weights
         return K.batch_get_value(weights)
@@ -499,6 +511,13 @@ class Network(Layer):
                 the output of `model.get_weights()`.
         """
         tuples = []
+        own_weight_vars = self._trainable_weights + self._non_trainable_weights
+        num_param = len(own_weight_vars)
+        own_weights = weights[:num_param]
+        for sw, w in zip(own_weight_vars, own_weights):
+            tuples.append((sw, w))
+        weights = weights[num_param:]
+
         for layer in self.layers:
             num_param = len(layer.weights)
             layer_weights = weights[:num_param]
@@ -958,12 +977,28 @@ class Network(Layer):
         unprocessed_nodes = {}
 
         def add_unprocessed_node(layer, node_data):
+            """Add node to layer list
+
+            # Arguments
+                layer: layer object
+                node_data: Node data specifying layer call
+            """
             if layer not in unprocessed_nodes:
                 unprocessed_nodes[layer] = [node_data]
             else:
                 unprocessed_nodes[layer].append(node_data)
 
         def process_node(layer, node_data):
+            """Reconstruct node by linking to inbound layers
+
+            # Arguments
+                layer: Layer to process
+                node_data: List of layer configs
+
+            # Raises
+                ValueError: For incorrect layer config
+                LookupError: If layer required is not found
+            """
             input_tensors = []
             for input_data in node_data:
                 inbound_layer_name = input_data[0]
@@ -976,12 +1011,14 @@ class Network(Layer):
                 else:
                     raise ValueError('Improperly formatted model config.')
                 inbound_layer = created_layers[inbound_layer_name]
+                # Raise an error if the corresponding layer node
+                # has not yet been created
                 if len(inbound_layer._inbound_nodes) <= inbound_node_index:
-                    add_unprocessed_node(layer, node_data)
-                    return
+                    raise LookupError
                 inbound_node = inbound_layer._inbound_nodes[inbound_node_index]
                 input_tensors.append(
                     inbound_node.output_tensors[inbound_tensor_index])
+
             # Call layer on its inputs, thus creating the node
             # and building the layer if needed.
             if input_tensors:
@@ -1017,6 +1054,7 @@ class Network(Layer):
         # First, we create all layers and enqueue nodes to be processed
         for layer_data in config['layers']:
             process_layer(layer_data)
+
         # Then we process nodes in order of layer depth.
         # Nodes that cannot yet be processed (if the inbound node
         # does not yet exist) are re-enqueued, and the process
@@ -1024,10 +1062,33 @@ class Network(Layer):
         while unprocessed_nodes:
             for layer_data in config['layers']:
                 layer = created_layers[layer_data['name']]
-                if layer in unprocessed_nodes:
-                    for node_data in unprocessed_nodes.pop(layer):
-                        process_node(layer, node_data)
 
+                # Process all nodes in layer, if not yet processed
+                if layer in unprocessed_nodes:
+                    node_data_list = unprocessed_nodes[layer]
+
+                    # Process nodes in order
+                    node_index = 0
+                    while node_index < len(node_data_list):
+                        node_data = node_data_list[node_index]
+                        try:
+                            process_node(layer, node_data)
+
+                        # If the node does not have all inbound layers
+                        # available, stop processing and continue later
+                        except LookupError:
+                            break
+
+                        node_index += 1
+
+                    # If not all nodes processed then store unprocessed nodes
+                    if node_index < len(node_data_list):
+                        unprocessed_nodes[layer] = node_data_list[node_index:]
+                    # If all nodes processed remove the layer
+                    else:
+                        del unprocessed_nodes[layer]
+
+        # Create lits of input and output tensors and return new class
         name = config.get('name')
         input_tensors = []
         output_tensors = []
@@ -1063,7 +1124,11 @@ class Network(Layer):
         was never compiled in the first place).
 
         # Arguments
-            filepath: String, path to the file to save the weights to.
+            filepath: one of the following:
+                - string, path to the file to save the model to
+                - h5py.File or h5py.Group object where to save the model
+                - any file-like object implementing the method `write` that accepts
+                    `bytes` data (e.g. `io.BytesIO`).
             overwrite: Whether to silently overwrite any existing file at the
                 target location, or provide the user with a manual prompt.
             include_optimizer: If True, save optimizer's state together.
@@ -1163,6 +1228,10 @@ class Network(Layer):
             else:
                 saving.load_weights_from_hdf5_group(
                     f, self.layers, reshape=reshape)
+            if hasattr(f, 'close'):
+                f.close()
+            elif hasattr(f.file, 'close'):
+                f.file.close()
 
     def _updated_config(self):
         """Util hared between different serialization methods.
@@ -1307,7 +1376,7 @@ def _map_graph_network(inputs, outputs):
         This recursively updates the map `layer_indices`,
         the list `nodes_in_decreasing_depth` and the set `network_nodes`.
 
-        # Arguments:
+        # Arguments
             tensor: Some tensor in a graph.
             finished_nodes: Set of nodes whose subgraphs have been traversed
                 completely. Useful to prevent duplicated work.
@@ -1318,7 +1387,7 @@ def _map_graph_network(inputs, outputs):
             node_index: Node index from which `tensor` comes from.
             tensor_index: Tensor_index from which `tensor` comes from.
 
-        # Raises:
+        # Raises
             ValueError: if a cycle is detected.
         """
         node = layer._inbound_nodes[node_index]
@@ -1432,7 +1501,7 @@ def _map_graph_network(inputs, outputs):
             layer = node.outbound_layer
             if layer:
                 for x in node.input_tensors:
-                    if x not in computable_tensors:
+                    if id(x) not in [id(ct) for ct in computable_tensors]:
                         raise ValueError('Graph disconnected: '
                                          'cannot obtain value for tensor ' +
                                          str(x) + ' at layer "' +

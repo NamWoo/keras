@@ -1,4 +1,5 @@
-'''Train a simple deep CNN on the CIFAR10 small images dataset.
+'''
+#Train a simple deep CNN on the CIFAR10 small images dataset.
 
 It gets to 75% validation accuracy in 25 epochs, and 79% after 50 epochs.
 (it's still underfitting at that point, though).
@@ -55,7 +56,7 @@ model.add(Dense(num_classes))
 model.add(Activation('softmax'))
 
 # initiate RMSprop optimizer
-opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+opt = keras.optimizers.RMSprop(learning_rate=0.0001, decay=1e-6)
 
 # Let's train the model using RMSprop
 model.compile(loss='categorical_crossentropy',

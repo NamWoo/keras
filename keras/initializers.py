@@ -80,8 +80,11 @@ class RandomNormal(Initializer):
         self.seed = seed
 
     def __call__(self, shape, dtype=None):
-        return K.random_normal(shape, self.mean, self.stddev,
-                               dtype=dtype, seed=self.seed)
+        x = K.random_normal(shape, self.mean, self.stddev,
+                            dtype=dtype, seed=self.seed)
+        if self.seed is not None:
+            self.seed += 1
+        return x
 
     def get_config(self):
         return {
@@ -108,8 +111,11 @@ class RandomUniform(Initializer):
         self.seed = seed
 
     def __call__(self, shape, dtype=None):
-        return K.random_uniform(shape, self.minval, self.maxval,
-                                dtype=dtype, seed=self.seed)
+        x = K.random_uniform(shape, self.minval, self.maxval,
+                             dtype=dtype, seed=self.seed)
+        if self.seed is not None:
+            self.seed += 1
+        return x
 
     def get_config(self):
         return {
@@ -124,7 +130,7 @@ class TruncatedNormal(Initializer):
 
     These values are similar to values from a `RandomNormal`
     except that values more than two standard deviations from the mean
-    are discarded and re-drawn. This is the recommended initializer for
+    are discarded and redrawn. This is the recommended initializer for
     neural network weights and filters.
 
     # Arguments
@@ -141,8 +147,11 @@ class TruncatedNormal(Initializer):
         self.seed = seed
 
     def __call__(self, shape, dtype=None):
-        return K.truncated_normal(shape, self.mean, self.stddev,
-                                  dtype=dtype, seed=self.seed)
+        x = K.truncated_normal(shape, self.mean, self.stddev,
+                               dtype=dtype, seed=self.seed)
+        if self.seed is not None:
+            self.seed += 1
+        return x
 
     def get_config(self):
         return {
@@ -210,12 +219,15 @@ class VarianceScaling(Initializer):
         if self.distribution == 'normal':
             # 0.879... = scipy.stats.truncnorm.std(a=-2, b=2, loc=0., scale=1.)
             stddev = np.sqrt(scale) / .87962566103423978
-            return K.truncated_normal(shape, 0., stddev,
-                                      dtype=dtype, seed=self.seed)
+            x = K.truncated_normal(shape, 0., stddev,
+                                   dtype=dtype, seed=self.seed)
         else:
             limit = np.sqrt(3. * scale)
-            return K.random_uniform(shape, -limit, limit,
-                                    dtype=dtype, seed=self.seed)
+            x = K.random_uniform(shape, -limit, limit,
+                                 dtype=dtype, seed=self.seed)
+        if self.seed is not None:
+            self.seed += 1
+        return x
 
     def get_config(self):
         return {
@@ -248,9 +260,11 @@ class Orthogonal(Initializer):
             num_rows *= dim
         num_cols = shape[-1]
         flat_shape = (num_rows, num_cols)
+        rng = np.random
         if self.seed is not None:
-            np.random.seed(self.seed)
-        a = np.random.normal(0.0, 1.0, flat_shape)
+            rng = np.random.RandomState(self.seed)
+            self.seed += 1
+        a = rng.normal(0.0, 1.0, flat_shape)
         u, _, v = np.linalg.svd(a, full_matrices=False)
         # Pick the one with the correct shape.
         q = u if u.shape == flat_shape else v
@@ -268,8 +282,8 @@ class Identity(Initializer):
     """Initializer that generates the identity matrix.
 
     Only use for 2D matrices.
-    If the desired matrix is not square, it pads with zeros on the
-    additional rows/columns
+    If the desired matrix is not square, it gets padded
+    with zeros for the additional rows/columns.
 
     # Arguments
         gain: Multiplicative factor to apply to the identity matrix.
@@ -278,25 +292,13 @@ class Identity(Initializer):
     def __init__(self, gain=1.):
         self.gain = gain
 
+    @K.eager
     def __call__(self, shape, dtype=None):
         if len(shape) != 2:
             raise ValueError(
-                'Identity matrix initializer can only be used for 2D matrices.')
-
-        if shape[0] == shape[1]:
-            return self.gain * np.identity(shape[0])
-        elif shape[0] > shape[1]:
-            return self.gain * np.concatenate(
-                [np.identity(shape[1]),
-                 np.zeros((shape[0] - shape[1], shape[1]))],
-                axis=0
-            )
-        else:
-            return self.gain * np.concatenate(
-                [np.identity(shape[0]),
-                 np.zeros((shape[0], shape[1] - shape[0]))],
-                axis=1
-            )
+                'Identity matrix initializer '
+                'can only be used for 2D matrices.')
+        return self.gain * K.eye((shape[0], shape[1]), dtype=dtype)
 
     def get_config(self):
         return {

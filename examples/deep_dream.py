@@ -1,11 +1,12 @@
-'''Deep Dreaming in Keras.
+'''
+#Deep Dreaming in Keras.
 
 Run the script with:
-```
+```python
 python deep_dream.py path_to_your_base_image.jpg prefix_for_results
 ```
 e.g.:
-```
+```python
 python deep_dream.py img/mypic.jpg results/dream
 ```
 '''
@@ -90,9 +91,9 @@ for layer_name in settings['features']:
     # We avoid border artifacts by only involving non-border pixels in the loss.
     scaling = K.prod(K.cast(K.shape(x), 'float32'))
     if K.image_data_format() == 'channels_first':
-        loss += coeff * K.sum(K.square(x[:, :, 2: -2, 2: -2])) / scaling
+        loss = loss + coeff * K.sum(K.square(x[:, :, 2: -2, 2: -2])) / scaling
     else:
-        loss += coeff * K.sum(K.square(x[:, 2: -2, 2: -2, :])) / scaling
+        loss = loss + coeff * K.sum(K.square(x[:, 2: -2, 2: -2, :])) / scaling
 
 # Compute the gradients of the dream wrt the loss.
 grads = K.gradients(loss, dream)[0]

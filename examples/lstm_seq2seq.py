@@ -1,4 +1,5 @@
-'''Sequence to sequence example in Keras (character-level).
+'''
+#Sequence to sequence example in Keras (character-level).
 
 This script demonstrates how to implement a basic character-level
 sequence-to-sequence model. We apply it to translating
@@ -7,7 +8,7 @@ character-by-character. Note that it is fairly unusual to
 do character-level machine translation, as word-level
 models are more common in this domain.
 
-# Summary of the algorithm
+**Summary of the algorithm**
 
 - We start with input sequences from a domain (e.g. English sentences)
     and corresponding target sequences from another domain
@@ -17,7 +18,7 @@ models are more common in this domain.
 - A decoder LSTM is trained to turn the target sequences into
     the same sequence but offset by one timestep in the future,
     a training process called "teacher forcing" in this context.
-    Is uses as initial state the state vectors from the encoder.
+    It uses as initial state the state vectors from the encoder.
     Effectively, the decoder learns to generate `targets[t+1...]`
     given `targets[...t]`, conditioned on the input sequence.
 - In inference mode, when we want to decode unknown input sequences, we:
@@ -32,21 +33,21 @@ models are more common in this domain.
     - Repeat until we generate the end-of-sequence character or we
         hit the character limit.
 
-# Data download
+**Data download**
 
-English to French sentence pairs.
-http://www.manythings.org/anki/fra-eng.zip
+[English to French sentence pairs.
+](http://www.manythings.org/anki/fra-eng.zip)
 
-Lots of neat sentence pairs datasets can be found at:
-http://www.manythings.org/anki/
+[Lots of neat sentence pairs datasets.
+](http://www.manythings.org/anki/)
 
-# References
+**References**
 
-- Sequence to Sequence Learning with Neural Networks
-    https://arxiv.org/abs/1409.3215
-- Learning Phrase Representations using
+- [Sequence to Sequence Learning with Neural Networks
+   ](https://arxiv.org/abs/1409.3215)
+- [Learning Phrase Representations using
     RNN Encoder-Decoder for Statistical Machine Translation
-    https://arxiv.org/abs/1406.1078
+    ](https://arxiv.org/abs/1406.1078)
 '''
 from __future__ import print_function
 
@@ -113,6 +114,7 @@ decoder_target_data = np.zeros(
 for i, (input_text, target_text) in enumerate(zip(input_texts, target_texts)):
     for t, char in enumerate(input_text):
         encoder_input_data[i, t, input_token_index[char]] = 1.
+    encoder_input_data[i, t + 1:, input_token_index[' ']] = 1.
     for t, char in enumerate(target_text):
         # decoder_target_data is ahead of decoder_input_data by one timestep
         decoder_input_data[i, t, target_token_index[char]] = 1.
@@ -120,7 +122,8 @@ for i, (input_text, target_text) in enumerate(zip(input_texts, target_texts)):
             # decoder_target_data will be ahead by one timestep
             # and will not include the start character.
             decoder_target_data[i, t - 1, target_token_index[char]] = 1.
-
+    decoder_input_data[i, t + 1:, target_token_index[' ']] = 1.
+    decoder_target_data[i, t:, target_token_index[' ']] = 1.
 # Define an input sequence and process it.
 encoder_inputs = Input(shape=(None, num_encoder_tokens))
 encoder = LSTM(latent_dim, return_state=True)
@@ -144,7 +147,8 @@ decoder_outputs = decoder_dense(decoder_outputs)
 model = Model([encoder_inputs, decoder_inputs], decoder_outputs)
 
 # Run training
-model.compile(optimizer='rmsprop', loss='categorical_crossentropy')
+model.compile(optimizer='rmsprop', loss='categorical_crossentropy',
+              metrics=['accuracy'])
 model.fit([encoder_input_data, decoder_input_data], decoder_target_data,
           batch_size=batch_size,
           epochs=epochs,

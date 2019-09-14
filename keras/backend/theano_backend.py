@@ -101,16 +101,6 @@ def to_dense(tensor):
         return tensor
 
 
-def _is_explicit_shape(shape):
-    if hasattr(shape, '__iter__'):
-        for x in shape:
-            if x is not None:
-                if not isinstance(x, int):
-                    return False
-        return True
-    return False
-
-
 NAME_SCOPE_STACK = []
 
 
@@ -164,13 +154,22 @@ def variable(value, dtype=None, name=None, constraint=None):
     return variable
 
 
+def is_variable(x):
+    return isinstance(x, theano.tensor.sharedvar.TensorSharedVariable)
+
+
 def constant(value, dtype=None, shape=None, name=None):
     if dtype is None:
         dtype = floatx()
     if shape is None:
         shape = ()
-    np_value = value * np.ones(shape)
-    const = T.constant(np_value,
+    if not is_tensor(value):
+        value = np.array(value)
+        if len(value.shape) == 0:
+            value = value * np.ones(shape)
+        if shape and value.shape != shape:
+            value = np.reshape(value, shape)
+    const = T.constant(value,
                        dtype=dtype,
                        name=_prepare_name(name, 'constant'))
     const._keras_shape = shape
@@ -230,7 +229,8 @@ def is_keras_tensor(x):
 
 def is_tensor(x):
     return isinstance(x, (T.TensorVariable,
-                          T.sharedvar.TensorSharedVariable))
+                          T.sharedvar.TensorSharedVariable,
+                          T.TensorConstant))
 
 
 def placeholder(shape=None, ndim=None, dtype=None, sparse=False, name=None):
@@ -330,14 +330,22 @@ def eye(size, dtype=None, name=None):
     """
     if dtype is None:
         dtype = floatx()
-    return variable(np.eye(size), dtype, name)
+    if isinstance(size, (list, tuple)):
+        n, m = size
+    else:
+        n, m = size, size
+    return variable(np.eye(n, m), dtype, name)
 
 
 def ones_like(x, dtype=None, name=None):
+    if dtype is None:
+        dtype = floatx()
     return T.ones_like(x, dtype=dtype)
 
 
 def zeros_like(x, dtype=None, name=None):
+    if dtype is None:
+        dtype = floatx()
     return T.zeros_like(x, dtype=dtype)
 
 
@@ -376,6 +384,18 @@ def count_params(x):
 
 def cast(x, dtype):
     return T.cast(x, dtype)
+
+
+def size(x, name=None):
+    """Returns the size of a tensor.
+    # Arguments
+        x: The input tensor.
+        name: A name for the operation (optional).
+    # Returns
+        Size of the tensor.
+    ```
+    """
+    return sum(ones_like(x, name=name))
 
 
 # UPDATES OPS
@@ -1066,33 +1086,23 @@ def arange(start, stop=None, step=1, dtype='int32'):
 
 
 def tile(x, n):
-    y = T.tile(x, n)
-    if hasattr(x, '_keras_shape'):
-        if _is_explicit_shape(n):
-            output_shape = x._keras_shape[:-len(n)]
-            for i, j in zip(x._keras_shape, n):
-                if i is None:
-                    output_shape += (None,)
-                else:
-                    output_shape += (i * j,)
-        elif isinstance(n, int):
-            output_shape = x._keras_shape[:-1]
-            if x._keras_shape[-1] is None:
-                output_shape += (None,)
-            else:
-                output_shape += (x._keras_shape[-1] * n,)
-        else:
-            # symbolic n
-            if n.ndim == 0:
-                # n is a scalar
-                output_shape = x._keras_shape[:-1] + (None,)
-            elif hasattr(n, '_keras_shape'):
-                # n is a vector
-                n_size = n._keras_shape[0]
-                output_shape = x._keras_shape[:-n_size] + (None,) * n_size
-            else:
-                output_shape = (None,) * x.ndim
-        y._keras_shape = output_shape
+    if isinstance(n, int):
+        n = (n,)
+    elif isinstance(n, list):
+        n = tuple(n)
+
+    y = T.tile(x, n, ndim=x.ndim)
+    shape = int_shape(x)
+    if shape is None:
+        return y
+    elif isinstance(n, tuple) and len(n) < len(shape):  # Padding the axis
+        n = tuple([1 for _ in range(len(shape) - len(n))]) + n
+    elif isinstance(n, tuple) and len(n) != len(shape):
+        raise NotImplementedError
+
+    if isinstance(n, tuple):
+        y._keras_shape = tuple([None if a is None else a * b
+                                for (a, b) in zip(shape, n)])
     return y
 
 
@@ -1331,6 +1341,11 @@ def reverse(x, axes):
     """
     if isinstance(axes, int):
         axes = [axes]
+    elif isinstance(axes, tuple):
+        axes = list(axes)
+    for i in range(len(axes)):
+        if axes[i] == -1:
+            axes[i] = x.ndim - 1
     slices = []
     for i in range(x.ndim):
         if i in axes:
@@ -1341,7 +1356,11 @@ def reverse(x, axes):
 
 
 def slice(x, start, size):
-    raise NotImplementedError
+    if not (len(int_shape(x)) == len(start) == len(size)):
+        raise ValueError('The dimension and the size of indices should match.')
+    out = x[tuple([py_slice(i, i + j) for (i, j) in zip(start, size)])]
+    out._keras_shape = tuple(size)
+    return out
 
 
 def pattern_broadcast(x, broadcastable):
@@ -1378,8 +1397,7 @@ def get_variable_shape(x):
 
 
 def print_tensor(x, message=''):
-    """Print the message and the tensor when evaluated and return the same
-    tensor.
+    """Print the message & the tensor when evaluated & return the same tensor.
     """
     p_op = Print(message)
     return p_op(x)
@@ -1395,16 +1413,32 @@ class Function(object):
             if v not in unique_variables_to_update:
                 unique_variables_to_update[v] = nv
         updates = unique_variables_to_update.items()
+        self.outputs = outputs
         self.function = theano.function(inputs, outputs, updates=updates,
                                         allow_input_downcast=True,
                                         on_unused_input='ignore',
                                         name=name,
                                         **kwargs)
+        self._metrics = [x for x in outputs if hasattr(x, '_is_metric')]
+        self._metrics_function = theano.function(
+            [], self._metrics,
+            name=name + '_metrics' if name else None)
         self.name = name
 
     def __call__(self, inputs):
         assert isinstance(inputs, (list, tuple))
-        return self.function(*inputs)
+        outputs = self.function(*inputs)
+        if self._metrics:
+            metrics = self._metrics_function()
+        i = 0
+        j = 0
+        for x in self.outputs:
+            if hasattr(x, '_is_metric'):
+                v = metrics[j]
+                outputs[i] = v
+                j += 1
+            i += 1
+        return outputs
 
 
 def _raise_invalid_arg(key):
@@ -1492,6 +1526,9 @@ def rnn(step_function, inputs, initial_states,
             raise ValueError('When specifying `unroll=True`, '
                              'an `input_length` '
                              'must be provided to `rnn`.')
+        if input_length == 1:
+            raise ValueError('`input_length=1` is not'
+                             ' supported when `unroll=True`.')
 
     axes = [1, 0] + list(range(2, ndim))
     inputs = inputs.dimshuffle(axes)
@@ -2938,3 +2975,20 @@ def local_conv2d(inputs,
                          (output_row, output_col, -1, filters))
         output = permute_dimensions(output, (2, 0, 1, 3))
     return output
+
+
+def ctc_label_dense_to_sparse(labels, label_lengths):
+    raise NotImplementedError
+
+
+def ctc_decode(y_pred, input_length, greedy=True, beam_width=100, top_paths=1,
+               merge_repeated=False):
+    raise NotImplementedError
+
+
+def control_dependencies(control_inputs):
+    @contextmanager
+    def nullcontextmanager():
+        yield
+
+    return nullcontextmanager()

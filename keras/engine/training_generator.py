@@ -9,6 +9,7 @@ import numpy as np
 
 from .training_utils import is_sequence
 from .training_utils import iter_sequence_infinite
+from .training_utils import should_run_validation
 from .. import backend as K
 from ..utils.data_utils import Sequence
 from ..utils.data_utils import GeneratorEnqueuer
@@ -27,6 +28,7 @@ def fit_generator(model,
                   callbacks=None,
                   validation_data=None,
                   validation_steps=None,
+                  validation_freq=1,
                   class_weight=None,
                   max_queue_size=10,
                   workers=1,
@@ -46,8 +48,13 @@ def fit_generator(model,
         warnings.warn(
             UserWarning('Using a generator with `use_multiprocessing=True`'
                         ' and multiple workers may duplicate your data.'
-                        ' Please consider using the`keras.utils.Sequence'
+                        ' Please consider using the `keras.utils.Sequence'
                         ' class.'))
+
+    # if generator is instance of Sequence and steps_per_epoch are not provided -
+    # recompute steps_per_epoch after each epoch
+    recompute_steps_per_epoch = use_sequence_api and steps_per_epoch is None
+
     if steps_per_epoch is None:
         if use_sequence_api:
             steps_per_epoch = len(generator)
@@ -78,20 +85,18 @@ def fit_generator(model,
     # prepare callbacks
     model.history = cbks.History()
     _callbacks = [cbks.BaseLogger(
-        stateful_metrics=model.stateful_metric_names)]
+        stateful_metrics=model.metrics_names[1:])]
     if verbose:
         _callbacks.append(
             cbks.ProgbarLogger(
                 count_mode='steps',
-                stateful_metrics=model.stateful_metric_names))
+                stateful_metrics=model.metrics_names[1:]))
     _callbacks += (callbacks or []) + [model.history]
     callbacks = cbks.CallbackList(_callbacks)
 
     # it's possible to callback a different model than self:
-    if hasattr(model, 'callback_model') and model.callback_model:
-        callback_model = model.callback_model
-    else:
-        callback_model = model
+    callback_model = model._get_callback_model()
+
     callbacks.set_model(callback_model)
     callbacks.set_params({
         'epochs': epochs,
@@ -100,7 +105,7 @@ def fit_generator(model,
         'do_validation': do_validation,
         'metrics': callback_metrics,
     })
-    callbacks.on_train_begin()
+    callbacks._call_begin_hook('train')
 
     enqueuer = None
     val_enqueuer = None
@@ -168,12 +173,11 @@ def fit_generator(model,
             else:
                 output_generator = generator
 
-        callback_model.stop_training = False
+        callbacks.model.stop_training = False
         # Construct epoch logs.
         epoch_logs = {}
         while epoch < epochs:
-            for m in model.stateful_metric_functions:
-                m.reset_states()
+            model.reset_metrics()
             callbacks.on_epoch_begin(epoch)
             steps_done = 0
             batch_index = 0
@@ -196,8 +200,6 @@ def fit_generator(model,
                                      'a tuple `(x, y, sample_weight)` '
                                      'or `(x, y)`. Found: ' +
                                      str(generator_output))
-                # build batch logs
-                batch_logs = {}
                 if x is None or len(x) == 0:
                     # Handle data tensors support when no input given
                     # step-size = 1 for data tensors
@@ -208,29 +210,35 @@ def fit_generator(model,
                     batch_size = list(x.values())[0].shape[0]
                 else:
                     batch_size = x.shape[0]
-                batch_logs['batch'] = batch_index
-                batch_logs['size'] = batch_size
+                # build batch logs
+                batch_logs = {'batch': batch_index, 'size': batch_size}
                 callbacks.on_batch_begin(batch_index, batch_logs)
 
                 outs = model.train_on_batch(x, y,
                                             sample_weight=sample_weight,
-                                            class_weight=class_weight)
+                                            class_weight=class_weight,
+                                            reset_metrics=False)
 
                 outs = to_list(outs)
                 for l, o in zip(out_labels, outs):
                     batch_logs[l] = o
 
-                callbacks.on_batch_end(batch_index, batch_logs)
+                callbacks._call_batch_hook('train', 'end', batch_index, batch_logs)
 
                 batch_index += 1
                 steps_done += 1
 
                 # Epoch finished.
-                if steps_done >= steps_per_epoch and do_validation:
+                if (steps_done >= steps_per_epoch and
+                        do_validation and
+                        should_run_validation(validation_freq, epoch)):
+                    # Note that `callbacks` here is an instance of
+                    # `keras.callbacks.CallbackList`
                     if val_gen:
                         val_outs = model.evaluate_generator(
                             val_enqueuer_gen,
                             validation_steps,
+                            callbacks=callbacks,
                             workers=0)
                     else:
                         # No need for try/except because
@@ -239,19 +247,39 @@ def fit_generator(model,
                             val_x, val_y,
                             batch_size=batch_size,
                             sample_weight=val_sample_weights,
+                            callbacks=callbacks,
                             verbose=0)
                     val_outs = to_list(val_outs)
                     # Same labels assumed.
                     for l, o in zip(out_labels, val_outs):
                         epoch_logs['val_' + l] = o
 
-                if callback_model.stop_training:
+                if callbacks.model.stop_training:
                     break
 
             callbacks.on_epoch_end(epoch, epoch_logs)
             epoch += 1
-            if callback_model.stop_training:
+            if callbacks.model.stop_training:
                 break
+
+            if use_sequence_api and workers == 0:
+                generator.on_epoch_end()
+
+            if recompute_steps_per_epoch:
+                if workers > 0:
+                    enqueuer.join_end_of_epoch()
+
+                # recomute steps per epochs in case if Sequence changes it's length
+                steps_per_epoch = len(generator)
+
+                # update callbacks to make sure params are valid each epoch
+                callbacks.set_params({
+                    'epochs': epochs,
+                    'steps': steps_per_epoch,
+                    'verbose': verbose,
+                    'do_validation': do_validation,
+                    'metrics': callback_metrics,
+                })
 
     finally:
         try:
@@ -261,27 +289,20 @@ def fit_generator(model,
             if val_enqueuer is not None:
                 val_enqueuer.stop()
 
-    callbacks.on_train_end()
+    callbacks._call_end_hook('train')
     return model.history
 
 
 def evaluate_generator(model, generator,
                        steps=None,
+                       callbacks=None,
                        max_queue_size=10,
                        workers=1,
                        use_multiprocessing=False,
                        verbose=0):
     """See docstring for `Model.evaluate_generator`."""
     model._make_test_function()
-
-    if hasattr(model, 'metrics'):
-        for m in model.stateful_metric_functions:
-            m.reset_states()
-        stateful_metric_indices = [
-            i for i, name in enumerate(model.metrics_names)
-            if str(name) in model.stateful_metric_names]
-    else:
-        stateful_metric_indices = []
+    model.reset_metrics()
 
     steps_done = 0
     outs_per_batch = []
@@ -291,7 +312,7 @@ def evaluate_generator(model, generator,
         warnings.warn(
             UserWarning('Using a generator with `use_multiprocessing=True`'
                         ' and multiple workers may duplicate your data.'
-                        ' Please consider using the`keras.utils.Sequence'
+                        ' Please consider using the `keras.utils.Sequence'
                         ' class.'))
     if steps is None:
         if use_sequence_api:
@@ -302,6 +323,22 @@ def evaluate_generator(model, generator,
                              ' Please specify `steps` or use the'
                              ' `keras.utils.Sequence` class.')
     enqueuer = None
+
+    # Check if callbacks have not been already configured
+    if not isinstance(callbacks, cbks.CallbackList):
+        callbacks = cbks.CallbackList(callbacks)
+        callback_model = model._get_callback_model()
+        callbacks.set_model(callback_model)
+        callback_metrics = list(model.metrics_names)
+        callback_params = {
+            'steps': steps,
+            'verbose': verbose,
+            'metrics': callback_metrics,
+        }
+        callbacks.set_params(callback_params)
+
+    callbacks.model.stop_training = False
+    callbacks._call_begin_hook('test')
 
     try:
         if workers > 0:
@@ -341,9 +378,6 @@ def evaluate_generator(model, generator,
                                  '(x, y, sample_weight) '
                                  'or (x, y). Found: ' +
                                  str(generator_output))
-            outs = model.test_on_batch(x, y, sample_weight=sample_weight)
-            outs = to_list(outs)
-            outs_per_batch.append(outs)
 
             if x is None or len(x) == 0:
                 # Handle data tensors support when no input given
@@ -359,27 +393,39 @@ def evaluate_generator(model, generator,
                 raise ValueError('Received an empty batch. '
                                  'Batches should contain '
                                  'at least one item.')
+
+            batch_logs = {'batch': steps_done, 'size': batch_size}
+            callbacks._call_batch_hook('test', 'begin', steps_done, batch_logs)
+            outs = model.test_on_batch(x, y,
+                                       sample_weight=sample_weight,
+                                       reset_metrics=False)
+            outs = to_list(outs)
+            outs_per_batch.append(outs)
+
+            for l, o in zip(model.metrics_names, outs):
+                batch_logs[l] = o
+            callbacks._call_batch_hook('test', 'end', steps_done, batch_logs)
+
             steps_done += 1
             batch_sizes.append(batch_size)
+
             if verbose == 1:
                 progbar.update(steps_done)
+        callbacks._call_end_hook('test')
 
     finally:
         if enqueuer is not None:
             enqueuer.stop()
 
-    averages = []
-    for i in range(len(outs)):
-        if i not in stateful_metric_indices:
-            averages.append(np.average([out[i] for out in outs_per_batch],
-                                       weights=batch_sizes))
-        else:
-            averages.append(np.float64(outs_per_batch[-1][i]))
+    averages = [float(outs_per_batch[-1][0])]  # index 0 = 'loss'
+    for i in range(1, len(outs)):
+        averages.append(np.float64(outs_per_batch[-1][i]))
     return unpack_singleton(averages)
 
 
 def predict_generator(model, generator,
                       steps=None,
+                      callbacks=None,
                       max_queue_size=10,
                       workers=1,
                       use_multiprocessing=False,
@@ -394,7 +440,7 @@ def predict_generator(model, generator,
         warnings.warn(
             UserWarning('Using a generator with `use_multiprocessing=True`'
                         ' and multiple workers may duplicate your data.'
-                        ' Please consider using the`keras.utils.Sequence'
+                        ' Please consider using the `keras.utils.Sequence'
                         ' class.'))
     if steps is None:
         if use_sequence_api:
@@ -405,6 +451,20 @@ def predict_generator(model, generator,
                              ' Please specify `steps` or use the'
                              ' `keras.utils.Sequence` class.')
     enqueuer = None
+
+    # Check if callbacks have not been already configured
+    if not isinstance(callbacks, cbks.CallbackList):
+        callbacks = cbks.CallbackList(callbacks)
+        callback_model = model._get_callback_model()
+        callbacks.set_model(callback_model)
+        callback_params = {
+            'steps': steps,
+            'verbose': verbose,
+        }
+        callbacks.set_params(callback_params)
+
+    callbacks.model.stop_training = False
+    callbacks._call_begin_hook('predict')
 
     try:
         if workers > 0:
@@ -446,6 +506,24 @@ def predict_generator(model, generator,
                 # yields inputs (not targets and sample weights).
                 x = generator_output
 
+            if x is None or len(x) == 0:
+                # Handle data tensors support when no input given
+                # step-size = 1 for data tensors
+                batch_size = 1
+            elif isinstance(x, list):
+                batch_size = x[0].shape[0]
+            elif isinstance(x, dict):
+                batch_size = list(x.values())[0].shape[0]
+            else:
+                batch_size = x.shape[0]
+            if batch_size == 0:
+                raise ValueError('Received an empty batch. '
+                                 'Batches should contain '
+                                 'at least one item.')
+
+            batch_logs = {'batch': steps_done, 'size': batch_size}
+            callbacks._call_batch_hook('predict', 'begin', steps_done, batch_logs)
+
             outs = model.predict_on_batch(x)
             outs = to_list(outs)
 
@@ -455,10 +533,14 @@ def predict_generator(model, generator,
 
             for i, out in enumerate(outs):
                 all_outs[i].append(out)
+
+            batch_logs['outputs'] = outs
+            callbacks._call_batch_hook('predict', 'end', steps_done, batch_logs)
+
             steps_done += 1
             if verbose == 1:
                 progbar.update(steps_done)
-
+        callbacks._call_end_hook('predict')
     finally:
         if enqueuer is not None:
             enqueuer.stop()

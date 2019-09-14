@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
-'''This example uses a convolutional stack followed by a recurrent stack
+'''
+# Optical character recognition
+This example uses a convolutional stack followed by a recurrent stack
 and a CTC logloss function to perform optical character recognition
 of generated text images. I have no evidence of whether it actually
 learns general shapes of text, or just is able to recognize all
@@ -17,17 +19,25 @@ the word list to include two words separated by a space.
 The table below shows normalized edit distance values. Theano uses
 a slightly different CTC implementation, hence the different results.
 
-            Norm. ED
 Epoch |   TF   |   TH
-------------------------
-    10   0.027   0.064
-    15   0.038   0.035
-    20   0.043   0.045
-    25   0.014   0.019
+-----:|-------:|-------:
+    10|  0.027 | 0.064
+    15|  0.038 | 0.035
+    20|  0.043 | 0.045
+    25|  0.014 | 0.019
 
-This requires cairo and editdistance packages:
+# Additional dependencies
+
+This requires ```cairo``` and ```editdistance``` packages:
+
+First, install the Cairo library: https://cairographics.org/
+
+Then install Python dependencies:
+
+```python
 pip install cairocffi
 pip install editdistance
+```
 
 Created by Mike Henry
 https://github.com/mbhenry/
@@ -182,7 +192,7 @@ def is_valid_str(in_str):
 
 
 # Uses generator functions to supply train/test with
-# data. Image renderings are text are created on the fly
+# data. Image renderings and text are created on the fly
 # each time with random perturbations
 
 class TextImageGenerator(keras.callbacks.Callback):
@@ -513,7 +523,10 @@ def train(run_name, start_epoch, stop_epoch, img_w):
         name='ctc')([y_pred, labels, input_length, label_length])
 
     # clipnorm seems to speeds up convergence
-    sgd = SGD(lr=0.02, decay=1e-6, momentum=0.9, nesterov=True, clipnorm=5)
+    sgd = SGD(learning_rate=0.02,
+              decay=1e-6,
+              momentum=0.9,
+              nesterov=True)
 
     model = Model(inputs=[input_data, labels, input_length, label_length],
                   outputs=loss_out)
